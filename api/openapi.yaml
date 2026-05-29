@@ -1,0 +1,198 @@
+openapi: 3.0.3
+info:
+  title: IDP Studio API
+  version: 1.0.0
+  description: >
+    Single API contract for Intelligent Document Processing (IDP) of insurance
+    broker / underwriting documents. The SAME contract is implemented by two
+    interchangeable backends:
+      * AWS  — API Gateway (REST) + Lambda + Bedrock / Textract / S3
+      * Azure — API Management + Functions + Document Intelligence / Azure OpenAI / Blob
+    The frontend (static SPA on GitHub Pages) talks only to this contract, so you
+    can point it at either cloud by changing the API base URL.
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
+    description: AWS API Gateway
+    variables:
+      apiId:  { default: REPLACE_ME }
+      region: { default: eu-west-1 }
+      stage:  { default: prod }
+  - url: https://{apimName}.azure-api.net/idp
+    description: Azure API Management
+    variables:
+      apimName: { default: REPLACE_ME }
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /v1/extract/bedrock:
+    post:
+      summary: Extract a document directly with a Bedrock foundation model
+      operationId: extractBedrock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BedrockRequest' }
+      responses:
+        '200': { description: Extraction result, content: { application/json: { schema: { $ref: '#/components/schemas/ExtractResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/extract/textract:
+    post:
+      summary: Extract a document with AWS Textract, then map to target schema
+      operationId: extractTextract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TextractRequest' }
+      responses:
+        '200': { description: Raw + mapped result, content: { application/json: { schema: { $ref: '#/components/schemas/TextractResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/extract/azure:
+    post:
+      summary: Extract with Azure Document Intelligence, then map with Azure OpenAI
+      operationId: extractAzure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AzureRequest' }
+      responses:
+        '200': { description: Extraction result, content: { application/json: { schema: { $ref: '#/components/schemas/ExtractResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/agents/run:
+    post:
+      summary: Run the multi-agent pipeline (ingest → OCR → PII mask → extract → validate)
+      operationId: runAgents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentsRequest' }
+      responses:
+        '200': { description: Per-agent steps + final result, content: { application/json: { schema: { $ref: '#/components/schemas/AgentsResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/logs:
+    get:
+      summary: List processing log entries stored in S3 (or Azure Blob)
+      operationId: listLogs
+      parameters:
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [bedrock, textract, agents, azure] } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        '200': { description: Log list, content: { application/json: { schema: { $ref: '#/components/schemas/LogList' } } } }
+
+components:
+  securitySchemes:
+    ApiKeyAuth: { type: apiKey, in: header, name: x-api-key }
+
+  responses:
+    BadRequest:  { description: Invalid input, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    ServerError: { description: Processing failure, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  schemas:
+    BaseRequest:
+      type: object
+      required: [document_base64, target_schema]
+      properties:
+        filename:        { type: string, example: broker_application.pdf }
+        document_base64: { type: string, description: Base64-encoded PDF bytes }
+        target_schema:   { type: string, description: Desired output as a JSON string (object or JSON Schema) }
+        mask_pii:        { type: boolean, default: true, description: Mask PII before writing logs }
+
+    BedrockRequest:
+      allOf:
+        - $ref: '#/components/schemas/BaseRequest'
+        - type: object
+          properties:
+            model: { type: string, example: anthropic.claude-sonnet-4-6-v1:0 }
+
+    TextractRequest:
+      allOf:
+        - $ref: '#/components/schemas/BaseRequest'
+        - type: object
+          properties:
+            feature_types:
+              type: array
+              items: { type: string, enum: [FORMS, TABLES, QUERIES, SIGNATURES] }
+              default: [FORMS, TABLES]
+
+    AzureRequest:
+      allOf:
+        - $ref: '#/components/schemas/BaseRequest'
+        - type: object
+          properties:
+            model:      { type: string, example: prebuilt-layout }
+            deployment: { type: string, example: gpt-4o-mapping }
+
+    AgentsRequest:
+      $ref: '#/components/schemas/BaseRequest'
+
+    ExtractResult:
+      type: object
+      properties:
+        run_id:      { type: string }
+        capability:  { type: string }
+        model:       { type: string }
+        status:      { type: string, enum: [succeeded, failed] }
+        latency_ms:  { type: integer }
+        s3_key:      { type: string }
+        result:      { type: object, description: The document mapped to the target schema }
+
+    TextractResult:
+      allOf:
+        - $ref: '#/components/schemas/ExtractResult'
+        - type: object
+          properties:
+            raw_keyvalues: { type: object, description: Raw Textract key/value pairs and table summaries }
+
+    AgentStep:
+      type: object
+      properties:
+        id:     { type: string }
+        title:  { type: string }
+        icon:   { type: string }
+        svc:    { type: string }
+        input:  { type: object }
+        output: { type: object }
+
+    AgentsResult:
+      allOf:
+        - $ref: '#/components/schemas/ExtractResult'
+        - type: object
+          properties:
+            steps: { type: array, items: { $ref: '#/components/schemas/AgentStep' } }
+
+    LogEntry:
+      type: object
+      properties:
+        timestamp:  { type: string, format: date-time }
+        run_id:     { type: string }
+        capability: { type: string }
+        model:      { type: string }
+        status:     { type: string }
+        latency_ms: { type: integer }
+        s3_key:     { type: string }
+        detail:     { type: object }
+
+    LogList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/LogEntry' } }
+
+    Error:
+      type: object
+      properties:
+        error:   { type: string }
+        message: { type: string }
+        run_id:  { type: string }

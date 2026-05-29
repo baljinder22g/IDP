@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and edit.
+
+location       = "eastus"
+# allowed_origin = "https://YOUR_GITHUB_USERNAME.github.io"
+allowed_origin = "*"
+
+# Document Intelligence: F0 (free, limited) or S0 (standard / pay-as-you-go).
+docint_sku = "F0"
+
+# Set to false if your subscription does NOT yet have Azure OpenAI access.
+# Request access at https://aka.ms/oai/access first, then set true.
+deploy_openai = true
+
+# api_key = "choose-a-long-random-string"

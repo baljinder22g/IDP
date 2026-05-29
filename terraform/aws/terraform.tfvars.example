@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and edit. All values are optional (defaults shown).
+
+# AWS region where Bedrock + Textract are enabled.
+region = "us-east-1"
+
+# Restrict CORS to your GitHub Pages site (recommended for production).
+# allowed_origin = "https://YOUR_GITHUB_USERNAME.github.io"
+allowed_origin = "*"
+
+# Default Bedrock model (must be enabled under Bedrock > Model access).
+bedrock_model = "anthropic.claude-sonnet-4-6-v1:0"
+
+# Optional shared secret. If set, the SPA must send the same value as x-api-key.
+# api_key = "choose-a-long-random-string"
