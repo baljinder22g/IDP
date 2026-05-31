@@ -45,12 +45,12 @@ The browser sends a base64-encoded PDF and a **Target JSON schema** (the shape o
 
 | Tab | What it does | Best for |
 |-----|-------------|----------|
-| ① **Bedrock** | Sends the PDF directly to Claude. One step, highest accuracy. | Any PDF — free text, mixed content |
-| ② **Textract** | OCR extracts raw key/values from forms, then Claude maps them to your schema. Two steps. | Structured forms, tick-boxes, tables |
-| ③ **Agentic** | Full pipeline: Ingest → OCR → PII Mask → Extract → Validate. Each step is shown in the UI. | Demo / understanding the flow |
-| ④ **Azure** | Same idea but running on Azure (Document Intelligence + Azure OpenAI). | Azure environments |
+| ① **Bedrock** | Sends the PDF directly to a foundation model. One step, highest accuracy. | Any PDF — free text, mixed content |
+| ② **Textract** | OCR + forms/tables analysis — returns **key/values and tables as JSON**. No LLM. Optionally fuzzy-maps the key/values onto your Target JSON schema (deterministic difflib matching, still no model). | Structured forms, tick-boxes, tables |
+| ③ **Agentic** | Pipeline: Ingest → OCR (Textract) → PII Mask → Extract (Bedrock) → Validate. Each step shows its own input/output; if Bedrock access isn't enabled, steps 1–3 still complete and step 4 reports the error. | Demo / understanding the flow |
+| ④ **Azure** | Same idea on Azure (Document Intelligence + Azure OpenAI). | Azure environments |
 
-Both ① and ② produce the same JSON output — they just take different paths to get there.
+Tab ② is **deterministic OCR** (no model, no per-token cost beyond Textract pages); tabs ①/③/④ use a language model for schema-shaped extraction.
 
 ---
 

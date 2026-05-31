@@ -6,7 +6,7 @@
   <title>IDP Studio — Intelligent Document Processing</title>
   <meta name="description" content="End-to-end Intelligent Document Processing (IDP) for insurance broker / underwriting documents using AWS Bedrock, AWS Textract, multi-agent workflows, and Azure Document Intelligence." />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-  <link rel="stylesheet" href="assets/css/styles.css?v=1.1.2" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=1.1.4" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>" />
 </head>
 <body>
@@ -112,8 +112,8 @@
     <!-- ===================== TAB 2: TEXTRACT ===================== -->
     <section class="panel" id="panel-textract" role="tabpanel">
       <div class="panel-head">
-        <h2>Extraction via AWS Textract</h2>
-        <p class="muted">Textract performs OCR + forms/tables analysis to produce raw key-value pairs. A mapping step (Bedrock) then reshapes those raw pairs to your Target JSON. Good for structured forms and tables.</p>
+        <h2>Extraction via AWS Textract (no LLM)</h2>
+        <p class="muted">Textract performs OCR + forms/tables analysis and returns the extracted <strong>key/values and tables as JSON</strong> directly — no Bedrock / LLM step. Best for structured forms and tables.</p>
       </div>
       <div class="grid-2">
         <div class="card">
@@ -129,30 +129,32 @@
           <div class="file-meta" id="textract-file" hidden></div>
         </div>
         <div class="card">
-          <h3>2 · Target JSON schema</h3>
-          <textarea class="code" id="textract-schema" spellcheck="false" rows="12"></textarea>
-          <div class="row gap">
-            <button class="btn-ghost small" data-load-sample="textract-schema">Load sample schema</button>
-            <button class="btn-ghost small" data-format-json="textract-schema">Format</button>
+          <h3>2 · Options</h3>
+          <div class="row gap wrap">
+            <label class="field">
+              <span>Textract feature types</span>
+              <select id="textract-features" multiple size="4">
+                <option value="FORMS" selected>FORMS (key-value)</option>
+                <option value="TABLES" selected>TABLES</option>
+                <option value="QUERIES">QUERIES</option>
+                <option value="SIGNATURES">SIGNATURES</option>
+              </select>
+            </label>
+            <label class="field checkbox">
+              <input type="checkbox" id="textract-mask" checked />
+              <span>Mask PII in stored logs</span>
+            </label>
           </div>
+          <p class="muted small" style="margin-top:10px">Textract is OCR/forms only — no LLM. You always get raw key/values + tables. Optionally add a schema below for a best-effort mapping.</p>
         </div>
       </div>
       <div class="card">
-        <h3>3 · Options</h3>
-        <div class="row gap wrap">
-          <label class="field">
-            <span>Textract feature types</span>
-            <select id="textract-features" multiple size="3">
-              <option value="FORMS" selected>FORMS (key-value)</option>
-              <option value="TABLES" selected>TABLES</option>
-              <option value="QUERIES">QUERIES</option>
-              <option value="SIGNATURES">SIGNATURES</option>
-            </select>
-          </label>
-          <label class="field checkbox">
-            <input type="checkbox" id="textract-mask" checked />
-            <span>Mask PII in stored logs</span>
-          </label>
+        <h3>3 · Target JSON schema <span class="muted small" style="font-weight:400">(optional — best-effort mapping, no LLM)</span></h3>
+        <p class="muted small">Paste a schema to fuzzy-match Textract's key names onto your shape (deterministic, no model). Leave blank to just get raw key/values + tables.</p>
+        <textarea class="code" id="textract-schema" spellcheck="false" rows="8" placeholder="Optional: paste your Target JSON here"></textarea>
+        <div class="row gap" style="margin-top:10px">
+          <button class="btn-ghost small" data-load-sample="textract-schema">Load sample schema</button>
+          <button class="btn-ghost small" data-format-json="textract-schema">Format</button>
         </div>
         <div class="row gap" style="margin-top:14px">
           <button class="btn-primary" id="textract-run">▶ Run extraction</button>
@@ -161,15 +163,19 @@
       </div>
       <div class="grid-2">
         <div class="card output-card">
-          <div class="row between"><h3>Raw Textract key-values</h3><button class="btn-ghost small" data-copy="textract-raw">Copy</button></div>
-          <pre class="code output" id="textract-raw">// Raw OCR / forms output</pre>
+          <div class="row between"><h3>Key / values</h3><button class="btn-ghost small" data-copy="textract-raw">Copy</button></div>
+          <pre class="code output" id="textract-raw">// Key/value pairs Textract found</pre>
         </div>
         <div class="card output-card">
           <div class="row between">
-            <h3>Mapped Target JSON</h3>
-            <span class="status-chip" id="textract-status">idle</span>
+            <h3>Extracted JSON (key/values + tables)</h3>
+            <div class="row gap">
+              <span class="status-chip" id="textract-status">idle</span>
+              <button class="btn-ghost small" data-copy="textract-output">Copy</button>
+              <button class="btn-ghost small" data-download="textract-output">Download</button>
+            </div>
           </div>
-          <pre class="code output" id="textract-output">// Mapped result</pre>
+          <pre class="code output" id="textract-output">// Textract result as JSON</pre>
         </div>
       </div>
     </section>
@@ -474,8 +480,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-  <script src="assets/js/config.js?v=1.1.2"></script>
-  <script src="assets/js/api.js?v=1.1.2"></script>
-  <script src="assets/js/app.js?v=1.1.2"></script>
+  <script src="assets/js/config.js?v=1.1.4"></script>
+  <script src="assets/js/api.js?v=1.1.4"></script>
+  <script src="assets/js/app.js?v=1.1.4"></script>
 </body>
 </html>

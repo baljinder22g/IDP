@@ -117,25 +117,35 @@
 
   async function mockTextract(req) {
     await wait(1100);
-    const schema = parseSchema(req.target_schema);
-    const raw = {
+    const kv = {
       "Full Name": "Jonathan A. Whitfield",
       "Date of Birth": "12/03/1974",
       "Email": "[EMAIL]",
       "Policy Type": "Whole-of-Life (HNW)",
       "Sum Assured": "GBP 12,000,000",
       "Smoker": "No",
-      "Annual Income": "GBP 2,400,000",
-      "_tables": [{ "name": "Medical History", "rows": 3 }]
+      "Annual Income": "GBP 2,400,000"
     };
+    const tables = [
+      [["Condition", "Year", "Status"],
+       ["Hypertension", "2019", "Controlled"],
+       ["None other", "-", "-"]]
+    ];
+    const result = { source: "AWS Textract (no LLM)", key_values: kv, tables, summary: { kv_pairs: Object.keys(kv).length, tables: tables.length } };
+    if (req.target_schema) {
+      try {
+        result.target_json = fillSchema(JSON.parse(req.target_schema));
+        result.mapping = { matched: 6, total: 10, method: "fuzzy key match (no LLM) — mock" };
+      } catch { /* invalid schema → skip mapping */ }
+    }
     return {
       run_id: "run_" + Date.now().toString(36),
       capability: "textract",
-      service: "AWS Textract + Bedrock mapping",
+      service: "AWS Textract (forms + tables → JSON, no LLM)",
       status: "succeeded",
       latency_ms: 1040,
-      raw_keyvalues: raw,
-      result: fillSchema(schema),
+      raw_keyvalues: kv,
+      result,
       _mock: true
     };
   }
@@ -258,7 +268,7 @@
       }
       // Live mode: backend returns the full step list (no streaming in this contract).
       const r = await http(IDP_CONFIG.endpoints.agents, req);
-      (r.steps || []).forEach((s) => onStep && onStep(s.id, "done", s));
+      (r.steps || []).forEach((s) => onStep && onStep(s.id, s.status === "error" ? "error" : "done", s));
       this.recordLog({ run_id: r.run_id, capability: "agents", model: "multi-agent", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/agents/" + r.run_id + ".json"), detail: r });
       return r;
     },

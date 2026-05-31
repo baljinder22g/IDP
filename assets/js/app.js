@@ -144,16 +144,19 @@
   }
   function show(id, obj) { $("#" + id).textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2); }
 
-  function requireInputs(tabId, schemaId) {
+  function requireInputs(tabId, schemaId, requireSchema = true) {
     if (!files[tabId]) { alert("Upload a PDF first."); return null; }
-    const schemaStr = $("#" + schemaId).value.trim();
-    if (!schemaStr) { alert("Provide a Target JSON schema."); return null; }
-    return {
+    const out = {
       filename: files[tabId].name,
       size_kb: Math.round(files[tabId].size / 1024),
       document_base64: files[tabId].b64,
-      target_schema: schemaStr,
     };
+    if (schemaId) {
+      const schemaStr = $("#" + schemaId).value.trim();
+      if (requireSchema && !schemaStr) { alert("Provide a Target JSON schema."); return null; }
+      if (schemaStr) out.target_schema = schemaStr;
+    }
+    return out;
   }
 
   // ---------------- TAB 1: Bedrock ----------------
@@ -172,19 +175,24 @@
 
   // ---------------- TAB 2: Textract ----------------
   $("#textract-run").addEventListener("click", async () => {
-    const base = requireInputs("textract", "textract-schema"); if (!base) return;
+    const base = requireInputs("textract", "textract-schema", false); if (!base) return;  // schema optional
     const feats = $$("#textract-features option:checked").map((o) => o.value);
     const req = Object.assign(base, { feature_types: feats, mask_pii: $("#textract-mask").checked });
     setStatus("textract-status", "running"); show("textract-raw", "// Running Textract…"); show("textract-output", "// …");
     $("#textract-run").disabled = true;
     try {
       const r = await API.extractTextract(req);
-      show("textract-raw", r.raw_keyvalues || {}); show("textract-output", r.result);
+      const res = r.result || {};
+      show("textract-raw", r.raw_keyvalues || {});
+      // If a schema was provided, lead with the best-effort mapped JSON.
+      show("textract-output", res.target_json
+        ? { target_json: res.target_json, mapping: res.mapping, tables: res.tables }
+        : res);
       setStatus("textract-status", "succeeded");
     } catch (err) { setStatus("textract-status", "error"); show("textract-output", "Error: " + err.message); }
     finally { $("#textract-run").disabled = false; }
   });
-  $("#textract-clear").addEventListener("click", () => { files.textract = null; $("#textract-file").hidden = true; show("textract-raw", "// Raw OCR / forms output"); show("textract-output", "// Mapped result"); setStatus("textract-status", "idle"); });
+  $("#textract-clear").addEventListener("click", () => { files.textract = null; $("#textract-file").hidden = true; show("textract-raw", "// Key/value pairs Textract found"); show("textract-output", "// Textract result as JSON"); setStatus("textract-status", "idle"); });
 
   // ---------------- TAB 3: Agents ----------------
   const AGENT_DEFS = [
@@ -219,7 +227,13 @@
     else if (state === "done") {
       box.classList.add("done"); st.textContent = "✓";
       if (step) { $("#agin-" + id).textContent = JSON.stringify(step.input, null, 1); $("#agout-" + id).textContent = JSON.stringify(step.output, null, 1); }
-    } else if (state === "error") { box.classList.add("error"); st.textContent = "✕"; }
+    } else if (state === "error") {
+      box.classList.add("error"); st.textContent = "✕";
+      if (step) {
+        $("#agin-" + id).textContent = JSON.stringify(step.input, null, 1);
+        $("#agout-" + id).textContent = step.error ? ("⚠ " + step.error) : JSON.stringify(step.output, null, 1);
+      }
+    }
   }
   $("#agents-run").addEventListener("click", async () => {
     const base = requireInputs("agents", "agents-schema"); if (!base) return;
@@ -228,7 +242,18 @@
     $("#agents-run").disabled = true;
     try {
       const r = await API.runAgents(base, updateAgent);
-      setStatus("agents-status", "succeeded"); show("agents-output", r.result);
+      if (r.status === "succeeded") {
+        setStatus("agents-status", "succeeded"); show("agents-output", r.result);
+      } else {
+        setStatus("agents-status", "error");
+        show("agents-output", {
+          status: r.status,
+          note: "Pipeline completed steps 1–3, then failed at step 4 (AWS Bedrock).",
+          steps_completed: (r.steps || []).filter((s) => s.status !== "error").map((s) => s.id),
+          failed_step: r.failed_step || "extract",
+          error: r.error, message: r.message,
+        });
+      }
     } catch (err) { setStatus("agents-status", "error"); show("agents-output", "Error: " + err.message); }
     finally { $("#agents-run").disabled = false; }
   });
@@ -449,7 +474,7 @@ console.log(JSON.stringify(extracted, null, 2));`;
     refreshEnvPill();
     $("#buildInfo").textContent = "v" + IDP_CONFIG.build;
     // seed schemas
-    ["bedrock-schema", "textract-schema", "azure-schema", "agents-schema", "direct-schema"].forEach((id) => {
+    ["bedrock-schema", "azure-schema", "agents-schema", "direct-schema"].forEach((id) => {
       const el = $("#" + id); if (el && !el.value) el.value = IDP_CONFIG.sampleSchemaStr;
     });
     buildAgentBoxes();

@@ -9,7 +9,7 @@ Routes by HTTP method + path:
 Every step is logged so CloudWatch gives full visibility without needing
 the Lambda console code editor (which doesn't work for zip deployments).
 """
-import base64, json, logging, os, time, traceback
+import base64, difflib, json, logging, os, re, time, traceback
 import boto3
 from common import (
     respond, parse_body, new_run_id, write_log, mask_pii,
@@ -252,12 +252,10 @@ def handle_textract(event, req_id=""):
         filename = body.get("filename", "unknown.pdf")
         features = [f for f in body.get("feature_types", ["FORMS", "TABLES"])
                     if f in ("FORMS", "TABLES", "SIGNATURES")] or ["FORMS"]
-        mask     = body.get("mask_pii", True)
-        schema   = body.get("target_schema", "{}")
-        api_key  = body.get("bedrock_api_key")
+        mask       = body.get("mask_pii", True)
+        schema_str = body.get("target_schema")   # optional — enables best-effort mapping
 
-        logger.info(f"filename={filename} | features={features} | mask_pii={mask}")
-        logger.info(f"schema_len={len(schema)} chars | bedrock_auth={'bearer_token' if api_key else 'iam_role'}")
+        logger.info(f"filename={filename} | features={features} | mask_pii={mask} | map_to_schema={bool(schema_str)} | mode=textract-only (no LLM)")
 
         # Decode PDF
         pdf_bytes = base64.b64decode(body["document_base64"])
@@ -284,26 +282,33 @@ def handle_textract(event, req_id=""):
         tx_ms  = int((time.time() - t_tx) * 1000)
         logger.info(f"Textract DONE | job_ms={tx_ms} | total_blocks={len(blocks)}")
 
-        # Extract key/values
-        logger.debug("Reconstructing KEY_VALUE_SET pairs ...")
+        # Extract key/values + tables — NO LLM. Return Textract's data as JSON.
+        logger.debug("Reconstructing KEY_VALUE_SET pairs + tables ...")
         kv = _key_values(blocks)
-        logger.info(f"kv_pairs_found={len(kv)}")
-        if kv:
-            sample = dict(list(kv.items())[:5])
-            logger.debug(f"kv_sample={json.dumps(sample)}")
+        tables = _tables(blocks) if "TABLES" in features else []
+        logger.info(f"kv_pairs_found={len(kv)} | tables_found={len(tables)}")
 
-        # Map with Bedrock
-        logger.info(f"Mapping key/values → schema via Bedrock | model={MODEL} ...")
-        t_bk = time.time()
-        result = _bedrock_map(kv, schema, _bedrock_client(api_key))
-        bk_ms  = int((time.time() - t_bk) * 1000)
-        logger.info(f"Bedrock mapping DONE | bk_ms={bk_ms}")
-        logger.info(f"result_keys={list(result.keys()) if isinstance(result, dict) else type(result).__name__}")
+        result = {
+            "source": "AWS Textract (no LLM)",
+            "key_values": kv,
+            "tables": tables,
+            "summary": {"kv_pairs": len(kv), "tables": len(tables), "blocks": len(blocks)},
+        }
+
+        # Optional: best-effort, no-LLM mapping of key/values onto the target schema
+        if schema_str:
+            mapped, map_stats = _flatten_to_schema(kv, schema_str)
+            if mapped is not None:
+                result["target_json"] = mapped
+                result["mapping"] = map_stats
+                logger.info(f"schema mapping: matched {map_stats.get('matched')}/{map_stats.get('total')} fields")
+            else:
+                result["mapping"] = map_stats  # carries the error
 
         latency = int((time.time() - t0) * 1000)
         out = {
             "run_id": run_id, "capability": "textract",
-            "service": "AWS Textract + Bedrock", "status": "succeeded",
+            "service": "AWS Textract (forms + tables → JSON, no LLM)", "status": "succeeded",
             "latency_ms": latency, "raw_keyvalues": kv, "result": result,
         }
         logger.info(f"Writing S3 log ...")
@@ -378,16 +383,35 @@ def handle_agents(event, req_id=""):
                            {"kv_pairs": len(kv)},
                            {"pii_found": len(pii_fields), "masked_fields": pii_fields}))
 
-        # ── Step 4: Extract
+        # ── Step 4: Extract (Bedrock) — isolated so steps 1-3 are preserved if it fails
         logger.info(f"── STEP 4: Extract (Bedrock model={MODEL}) ──")
-        t_bk = time.time()
-        result = _bedrock_map(masked, schema, _bedrock_client(api_key))
-        bk_ms  = int((time.time() - t_bk) * 1000)
-        logger.info(f"Step 4 DONE: Extract | bk_ms={bk_ms} | result_keys={list(result.keys()) if isinstance(result, dict) else '?'}")
-        steps.append(_step("extract", "Extraction Agent", "🧠", "AWS Bedrock",
-                           {"masked": True}, result))
+        try:
+            t_bk = time.time()
+            result = _bedrock_map(masked, schema, _bedrock_client(api_key))
+            bk_ms  = int((time.time() - t_bk) * 1000)
+            logger.info(f"Step 4 DONE: Extract | bk_ms={bk_ms}")
+            steps.append(_step("extract", "Extraction Agent", "🧠", "AWS Bedrock",
+                               {"masked": True}, result))
+        except Exception as be:
+            logger.error(f"Step 4 FAILED: Bedrock | error={type(be).__name__}: {be}")
+            estep = _step("extract", "Extraction Agent", "🧠", "AWS Bedrock", {"masked": True}, None)
+            estep["status"] = "error"
+            estep["error"]  = f"{type(be).__name__}: {be}"
+            steps.append(estep)
+            latency = int((time.time() - t0) * 1000)
+            out = {
+                "run_id": run_id, "capability": "agents",
+                "status": "failed_at_extract", "failed_step": "extract",
+                "latency_ms": latency, "steps": steps, "result": None,
+                "error": "bedrock_failed", "message": str(be),
+            }
+            out["s3_key"] = write_log(s3, "agents", run_id,
+                                      {"filename": fname, "steps": steps, "error": str(be)},
+                                      mask=mask)
+            logger.info(f"AGENTS PARTIAL (steps 1-3 ok, step 4 Bedrock failed) | run_id={run_id}")
+            return respond(200, out)
 
-        # ── Step 5: Validate
+        # ── Step 5: Validate (only reached if extract succeeded)
         logger.info("── STEP 5: Validate ──")
         missing = _validate(result, schema)
         logger.info(f"Step 5 DONE: Validate | missing_fields={missing}")
@@ -518,6 +542,93 @@ def _key_values(blocks):
             if key_text:
                 kv[key_text.strip(": ")] = val_text.strip()
     return kv
+
+
+def _tables(blocks):
+    """Reconstruct TABLE blocks into a list of tables, each a list of row arrays."""
+    by_id = {b["Id"]: b for b in blocks}
+
+    def cell_text(cell):
+        out = []
+        for rel in cell.get("Relationships", []):
+            if rel["Type"] == "CHILD":
+                for cid in rel["Ids"]:
+                    c = by_id.get(cid, {})
+                    if c.get("BlockType") == "WORD":
+                        out.append(c.get("Text", ""))
+                    elif c.get("BlockType") == "SELECTION_ELEMENT" and c.get("SelectionStatus") == "SELECTED":
+                        out.append("[X]")
+        return " ".join(out)
+
+    tables = []
+    for b in blocks:
+        if b.get("BlockType") == "TABLE":
+            cells, max_r, max_c = {}, 0, 0
+            for rel in b.get("Relationships", []):
+                if rel["Type"] in ("CHILD", "TABLE_FOOTER", "TABLE_TITLE"):
+                    for cid in rel["Ids"]:
+                        c = by_id.get(cid, {})
+                        if c.get("BlockType") == "CELL":
+                            r, col = c.get("RowIndex", 0), c.get("ColumnIndex", 0)
+                            cells[(r, col)] = cell_text(c)
+                            max_r, max_c = max(max_r, r), max(max_c, col)
+            rows = [[cells.get((r, col), "") for col in range(1, max_c + 1)]
+                    for r in range(1, max_r + 1)]
+            if rows:
+                tables.append(rows)
+    return tables
+
+
+def _norm(s):
+    """Normalise a key for fuzzy comparison: lowercase, alnum tokens only."""
+    return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
+
+
+def _flatten_to_schema(kv, schema_str, threshold=0.55):
+    """Best-effort, NO-LLM mapping of Textract key/values onto the target schema.
+
+    Each scalar leaf key in the schema is matched to the closest Textract key by
+    name similarity (difflib ratio + token overlap + substring). Returns
+    (mapped_dict, stats). Purely deterministic — no model involved.
+    """
+    try:
+        schema = json.loads(schema_str)
+    except Exception:
+        return None, {"error": "target_schema is not valid JSON"}
+
+    kv_items = [(_norm(k), k) for k in kv.keys() if _norm(k)]
+    stats = {"matched": 0, "total": 0, "method": "fuzzy key match (difflib, no LLM)",
+             "threshold": threshold}
+
+    def best(key):
+        tn = _norm(key)
+        tt = set(tn.split())
+        best_key, best_score = None, 0.0
+        for nk, ok in kv_items:
+            kt = set(nk.split())
+            ratio   = difflib.SequenceMatcher(None, tn, nk).ratio()
+            overlap = (len(tt & kt) / len(tt)) if tt else 0.0
+            sub     = 1.0 if (tn and (tn in nk or nk in tn)) else 0.0
+            score   = max(ratio, overlap * 0.9, sub * 0.85)
+            if score > best_score:
+                best_score, best_key = score, ok
+        return best_key, best_score
+
+    def fill(key, node):
+        if isinstance(node, dict):
+            return {k: fill(k, v) for k, v in node.items()}
+        if isinstance(node, list):
+            return node if node else []
+        stats["total"] += 1
+        mk, score = best(key)
+        if mk and score >= threshold and kv.get(mk, "") != "":
+            stats["matched"] += 1
+            return kv[mk]
+        return None
+
+    mapped = ({k: fill(k, v) for k, v in schema.items()}
+              if isinstance(schema, dict) else fill("root", schema))
+    return mapped, stats
 
 
 def _bedrock_map(kv, schema, client=None):
