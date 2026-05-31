@@ -361,10 +361,12 @@
     };
     // reset just the stage-2 boxes
     ["extract", "unmask", "finalize"].forEach((id) => updateExternalAgent(id, "idle"));
-    setStatus("external-status", "running"); show("external-output", "// Calling your LLM, then unmasking…");
+    setStatus("external-status", "running");
+    show("external-masked-result", "// LLM running…"); show("external-output", "// Calling your LLM, then unmasking…");
     $("#external-run").disabled = true;
     try {
       const r = await API.agentsExtract(req, updateExternalAgent);
+      show("external-masked-result", r.masked_result || "// (no masked result returned)");
       if (r.status === "succeeded") {
         setStatus("external-status", "succeeded"); show("external-output", r.result);
       } else {
@@ -381,6 +383,7 @@
     const m = $("#external-file"); if (m) m.hidden = true;
     buildAgentBoxes("#external-flow", EXTERNAL_DEFS, "ext-");
     show("external-ocr", "// run Stage 1 to see OCR JSON"); show("external-masked", "// masked JSON appears here");
+    show("external-masked-result", "// masked LLM result appears here (still has [PII_n] tokens)");
     show("external-output", "// Final result after Stage 2");
     setStatus("external-prep-status", "idle"); setStatus("external-status", "idle");
     $("#external-run").disabled = true; $("#external-run-hint").textContent = "Run Stage 1 first.";

@@ -355,7 +355,7 @@
           { id: "finalize", title: "Finalize Agent", icon: "📦", svc: "Validate + deliver", input: { fields: Object.keys(schema).length }, output: { delivered: true, schema_valid: true } },
         ];
         for (const s of steps) { onStep && onStep(s.id, "running", null); await wait(800); onStep && onStep(s.id, "done", s); }
-        const r = { run_id: req.run_id || "run_x", status: "succeeded", steps, result: fillSchema(schema), final: { target_json: fillSchema(schema), valid: true }, _mock: true };
+        const r = { run_id: req.run_id || "run_x", status: "succeeded", steps, masked_result, result: fillSchema(schema), final: { target_json: fillSchema(schema), valid: true }, _mock: true };
         this.recordLog({ run_id: r.run_id, capability: "agents-external", model: (req.llm && req.llm.model) || "external", status: r.status, s3_key: "logs/agents-external/" + r.run_id + ".json", detail: r });
         return r;
       }

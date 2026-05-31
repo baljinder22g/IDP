@@ -9,10 +9,12 @@ Upload a PDF broker document, get clean structured JSON back — powered by AWS 
 | Service | What it does in this app |
 |---------|--------------------------|
 | **Amazon API Gateway** | Receives HTTPS requests from the browser. Acts as the secure front door — handles CORS, throttling, and routes each call to the Lambda. |
-| **AWS Lambda** | One Python function that handles all four API routes. It reads the PDF, calls Bedrock or Textract, writes a log to S3, and returns the result. No servers to manage. |
-| **Amazon Bedrock** | The AI brain. You send it a PDF and a JSON schema; it reads the document and returns the data shaped to your schema. Uses Anthropic Claude models. |
+| **AWS Lambda** | One Python function that handles every API route (Bedrock, Textract, agentic, prepare/extract, logs). It reads the PDF, calls the right AWS services (and, for Tab ④, your external LLM), writes a log to S3, and returns the result. No servers to manage. |
+| **Amazon Bedrock** | The AI brain. You send it a PDF and a JSON schema; it reads the document and returns the data shaped to your schema. Uses Anthropic Claude / Amazon Nova models. |
 | **Amazon Textract** | Specialist OCR service. Great at pulling key/value pairs and tables from structured forms (things like tick-boxes, form fields, tables). |
-| **Amazon S3** | Object storage. Stores uploaded PDFs temporarily (deleted after 1 day) and keeps processing logs for 30 days. |
+| **Amazon Comprehend** | Detects **PII** (names, emails, phones, addresses, IDs) in the extracted text via `DetectPiiEntities`. Used by the agentic pipelines to mask before extraction. Existing managed model — no training. |
+| **Amazon Comprehend Medical** | Detects **PHI** (protected health info) via `DetectPHI` for medical questionnaires. Optional per-run toggle (pricier). Existing managed model — no training. |
+| **Amazon S3** | Object storage. Stores uploaded PDFs + the reversible mask context temporarily (deleted after 1 day) and keeps processing logs for 30 days. |
 
 ---
 
@@ -23,14 +25,18 @@ flowchart LR
     Browser["🌐 IDP Studio\nGitHub Pages"]
     GW["API Gateway\none endpoint"]
     Lambda["Lambda\none function"]
-    Bedrock["Amazon Bedrock\nClaude AI"]
+    Bedrock["Amazon Bedrock\nClaude / Nova"]
     Textract["Amazon Textract\nOCR"]
+    Comprehend["Comprehend +\nComprehend Medical\nPII / PHI mask"]
+    ExtLLM["Your LLM\nGemini / Claude / OpenAI"]
     S3["Amazon S3\nstorage + logs"]
 
     Browser -->|"HTTPS + optional API key"| GW
     GW -->|"routes by path"| Lambda
     Lambda <-->|"AI extraction"| Bedrock
     Lambda <-->|"OCR / forms"| Textract
+    Lambda <-->|"PII / PHI masking"| Comprehend
+    Lambda <-->|"masked extract (Tab ④)"| ExtLLM
     Lambda <-->|"store + read logs"| S3
     Lambda -->|"JSON result"| Browser
 ```
@@ -344,6 +350,8 @@ flowchart LR
 </table>
 
 <p>The LLM call is made <strong>server-side from the Lambda</strong> (Python <code>urllib</code>, no extra dependencies) — no browser CORS problems. The API key is used in-memory and <strong>never written to S3 or logs</strong> (redacted). The model receives only <em>masked</em> values; PII/PHI is restored locally by the unmask step afterward. <strong>Step-4 cost is billed by your provider, not AWS</strong> (AWS only charges for Textract pages + the cheap Comprehend calls). A one-shot variant <code>POST /v1/agents/run-external</code> also exists (does all 6 steps in one call).</p>
+
+<p><strong>Unmask preview (transparency):</strong> the UI shows two panels side by side — the <em>masked LLM output</em> (exactly what the model returned, still containing <code>[PII_n]</code> tokens) next to the <em>final unmasked output</em> (tokens replaced with real values). This makes it auditable that the external model never received real PII/PHI.</p>
 
 <h2>API Contract</h2>
 

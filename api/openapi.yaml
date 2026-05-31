@@ -6,10 +6,17 @@ info:
     Single API contract for Intelligent Document Processing (IDP) of insurance
     broker / underwriting documents. The SAME contract is implemented by two
     interchangeable backends:
-      * AWS  — API Gateway (REST) + Lambda + Bedrock / Textract / S3
+      * AWS  — API Gateway (HTTP) + Lambda + Bedrock / Textract / Comprehend /
+               Comprehend Medical / S3
       * Azure — API Management + Functions + Document Intelligence / Azure OpenAI / Blob
     The frontend (static SPA on GitHub Pages) talks only to this contract, so you
     can point it at either cloud by changing the API base URL.
+
+    PII/PHI masking in the agentic pipelines uses Amazon Comprehend
+    (DetectPiiEntities) and Amazon Comprehend Medical (DetectPHI) — existing
+    managed models, no training. The "bring-your-own-LLM" flow (prepare +
+    extract) masks with reversible tokens, sends only masked text to the chosen
+    external LLM, then un-masks the result so the final output has real values.
 servers:
   - url: https://{apiId}.execute-api.{region}.amazonaws.com/{stage}
     description: AWS API Gateway
@@ -82,12 +89,65 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '500': { $ref: '#/components/responses/ServerError' }
 
+  /v1/agents/prepare:
+    post:
+      summary: "Bring-your-own-LLM, stage 1: ingest → Textract OCR → Comprehend PII/PHI mask (reversible tokens)"
+      description: >
+        Runs the AWS-only steps and stores the reversible {ocr, masked, mask_map}
+        context in S3 under the returned run_id (expires with the input bucket).
+        Returns the original OCR key/values (for display/copy) and the masked
+        key/values (with [PII_n] tokens). No LLM is called here.
+      operationId: agentsPrepare
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PrepareRequest' }
+      responses:
+        '200': { description: OCR + masked output + run_id, content: { application/json: { schema: { $ref: '#/components/schemas/PrepareResult' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/agents/extract:
+    post:
+      summary: "Bring-your-own-LLM, stage 2: extract via your LLM on masked data → unmask → validate"
+      description: >
+        Loads the masked data + mask_map by run_id, sends only masked values to
+        the caller-supplied external LLM with the (optional) prompt, then
+        un-masks the result so the final JSON contains real values. The external
+        API key is used server-side only and never logged.
+      operationId: agentsExtract
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExtractRequest' }
+      responses:
+        '200': { description: Steps + masked_result + unmasked result, content: { application/json: { schema: { $ref: '#/components/schemas/ExtractResult2' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { description: No prepared data for run_id (expired), content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /v1/agents/run-external:
+    post:
+      summary: "Bring-your-own-LLM, one-shot: all 6 steps (ingest → OCR → mask → your LLM → unmask → finalize)"
+      operationId: runAgentsExternal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RunExternalRequest' }
+      responses:
+        '200': { description: Per-agent steps + unmasked result, content: { application/json: { schema: { $ref: '#/components/schemas/ExtractResult2' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
   /v1/logs:
     get:
       summary: List processing log entries stored in S3 (or Azure Blob)
       operationId: listLogs
       parameters:
-        - { name: capability, in: query, required: false, schema: { type: string, enum: [bedrock, textract, agents, azure] } }
+        - { name: capability, in: query, required: false, schema: { type: string, enum: [bedrock, textract, agents, agents-external, prepare, azure] } }
         - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 200 } }
       responses:
         '200': { description: Log list, content: { application/json: { schema: { $ref: '#/components/schemas/LogList' } } } }
@@ -116,7 +176,7 @@ components:
         - $ref: '#/components/schemas/BaseRequest'
         - type: object
           properties:
-            model: { type: string, example: anthropic.claude-3-5-sonnet-20241022-v2:0 }
+            model: { type: string, example: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }
 
     TextractRequest:
       allOf:
@@ -137,7 +197,70 @@ components:
             deployment: { type: string, example: gpt-4o-mapping }
 
     AgentsRequest:
-      $ref: '#/components/schemas/BaseRequest'
+      allOf:
+        - $ref: '#/components/schemas/BaseRequest'
+        - type: object
+          properties:
+            detect_phi: { type: boolean, default: true, description: "Also detect PHI via Amazon Comprehend Medical (extra cost). Uncheck for PII-only via Amazon Comprehend." }
+
+    LlmConfig:
+      type: object
+      required: [provider, api_key, model]
+      properties:
+        provider: { type: string, enum: [google, anthropic, openai], description: "External LLM provider. 'openai' covers any OpenAI-compatible endpoint." }
+        api_key:  { type: string, description: "Your provider API key. Used server-side only; never stored or logged." }
+        model:    { type: string, example: gemini-2.5-flash }
+        base_url: { type: string, example: https://api.openai.com/v1, description: "Only for provider=openai (OpenAI / Groq / OpenRouter / …)." }
+
+    PrepareRequest:
+      type: object
+      required: [document_base64]
+      properties:
+        filename:        { type: string }
+        document_base64: { type: string, description: Base64-encoded PDF bytes }
+        detect_phi:      { type: boolean, default: true }
+
+    PrepareResult:
+      type: object
+      properties:
+        run_id:           { type: string, description: Use this in /v1/agents/extract }
+        status:           { type: string }
+        steps:            { type: array, items: { $ref: '#/components/schemas/AgentStep' } }
+        ocr_keyvalues:    { type: object, description: Original Textract key/values (for display/copy) }
+        masked_keyvalues: { type: object, description: Key/values with reversible [PII_n] tokens (what the LLM will receive) }
+        entities:         { type: object, description: "Counts + types: { pii, phi, types, tokens }" }
+
+    ExtractRequest:
+      type: object
+      required: [run_id, llm]
+      properties:
+        run_id:        { type: string, description: From /v1/agents/prepare }
+        target_schema: { type: string }
+        prompt:        { type: string, description: "Optional. Defaults to an insurance-underwriting prompt; the schema + masked data are appended automatically. Must instruct the model to preserve [PII_n] tokens." }
+        llm:           { $ref: '#/components/schemas/LlmConfig' }
+
+    ExtractResult2:
+      type: object
+      properties:
+        run_id:        { type: string }
+        capability:    { type: string, example: agents-external }
+        status:        { type: string, enum: [succeeded, failed_at_extract] }
+        latency_ms:    { type: integer }
+        steps:         { type: array, items: { $ref: '#/components/schemas/AgentStep' } }
+        masked_result: { type: object, description: "The LLM's raw output (still contains [PII_n] tokens) — shown for transparency" }
+        result:        { type: object, description: "Final UNMASKED result — tokens replaced with the original values" }
+        final:         { type: object, description: "{ target_json, provider, model, valid, missing_required }" }
+        s3_key:        { type: string }
+
+    RunExternalRequest:
+      allOf:
+        - $ref: '#/components/schemas/BaseRequest'
+        - type: object
+          required: [llm]
+          properties:
+            detect_phi: { type: boolean, default: true }
+            prompt:     { type: string }
+            llm:        { $ref: '#/components/schemas/LlmConfig' }
 
     ExtractResult:
       type: object
