@@ -1,0 +1,1 @@
+# Terraform writes lambda.zip here during `terraform apply`.

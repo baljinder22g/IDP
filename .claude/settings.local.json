@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(py --version)",
+      "Bash(terraform -version)",
+      "mcp__Claude_Preview__preview_start"
+    ]
+  }
+}

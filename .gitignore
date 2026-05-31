@@ -5,30 +5,3 @@
 crash.log
 .terraform.lock.hcl
 terraform/aws/build/*.zip
-
-# Azure Functions
-terraform/azure/function/.python_packages/
-terraform/azure/function/__pycache__/
-terraform/azure/function/local.settings.json
-
-# Python
-__pycache__/
-*.pyc
-
-# Temp test artifacts (may contain base64 docs / short-term tokens)
-test/_*
-
-# OS / editors
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# Local tool settings and build artifacts
-.claude/
-assets/node_modules/
-assets/document.pdf
-docs/documentation.html
-terraform/aws/build/
-terraform/aws/terraform.tfvars
-terraform/azure/terraform.tfvars
