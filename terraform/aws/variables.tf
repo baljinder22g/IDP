@@ -48,3 +48,22 @@ variable "log_retention_days" {
   type        = number
   default     = 14
 }
+
+# ── Cost guardrails ──────────────────────────────────────────────────────────
+variable "monthly_budget_usd" {
+  description = "Monthly AWS cost budget (USD) for this account. An alert email is sent at 50%, 80% and 100% of this amount. Set to 0 to skip creating the budget."
+  type        = number
+  default     = 10
+}
+
+variable "budget_alert_email" {
+  description = "Email address to receive budget alerts. Required if monthly_budget_usd > 0."
+  type        = string
+  default     = ""
+}
+
+variable "bedrock_max_tokens" {
+  description = "Max output tokens per Bedrock call (caps per-request cost)."
+  type        = number
+  default     = 4096
+}

@@ -186,18 +186,31 @@ This deletes everything Terraform created. S3 buckets are force-destroyed (conte
 
 ---
 
-### Cost estimate
+### Cost estimate & guardrails
 
 | Service | Free tier | Typical POC cost |
 |---------|-----------|-----------------|
 | Lambda | 1M requests/month free forever | ~$0 |
 | API Gateway (HTTP) | 1M calls/month free (12 months) | ~$0 |
 | S3 | 5 GB free | ~$0 |
-| Textract | 1,000 pages/month free (3 months) | ~$0 |
-| **Bedrock** | **No free tier** | ~$0.01–0.05 per document (Sonnet) |
+| Textract | 1,000 pages/month free (3 months) | then ~$0.05/page (FORMS) |
+| **Bedrock** | **No free tier** | per-token (see below) |
 | CloudWatch Logs | 5 GB free | ~$0 |
 
-Bedrock is the only real cost. One document extraction with Claude Sonnet 4.6 is roughly **$0.01–0.05** depending on document size. Use Claude Haiku for cheapest testing.
+Bedrock + Textract are the only metered services, and **only when you actually run an extraction — idle cost is $0**. Per-document Bedrock cost by model (smallest → largest):
+
+| Model | Subscription | Approx cost / 1M tokens (in/out) | Notes |
+|-------|--------------|----------------------------------|-------|
+| **Amazon Nova Lite** | none (first-party) | ~$0.06 / $0.24 | cheapest multimodal; needs on-demand quota |
+| Amazon Nova Pro | none (first-party) | ~$0.80 / $3.20 | higher quality, no subscription |
+| Claude Haiku 4.5 | AWS Marketplace | ~$1 / $5 | fast, good quality |
+| Claude Sonnet 4.5 | AWS Marketplace | ~$3 / $15 | best quality |
+
+**Cost guardrails built in:**
+- An **AWS Budget** (Terraform `monthly_budget_usd`, default $10) emails you at 50/80/100% of the limit.
+- `bedrock_max_tokens` (default 4096) caps output tokens per call.
+- API Gateway throttling caps requests at 20/s.
+- Textract defaults to **FORMS** only (TABLES/QUERIES add per-page cost).
 
 ---
 
@@ -207,9 +220,14 @@ Bedrock is the only real cost. One document extraction with Claude Sonnet 4.6 is
 |---------|-----|
 | App still shows "Mock mode" | You didn't save the API base URL, or saved it with a trailing slash. |
 | CORS error in browser console | Set `allowed_origin` in tfvars to your exact GitHub Pages URL and re-run `terraform apply`. |
-| `AccessDeniedException` from Bedrock | Enable Claude model access in Bedrock console (same region as your deploy). |
+| `not_found` on every tab | API uses a named stage (e.g. `prod`); the Lambda now strips the stage prefix from the path. Make sure you deployed the current `handler.py`. |
+| `INVALID_PAYMENT_INSTRUMENT` / "Marketplace subscription can't complete" | Anthropic Claude models need an AWS Marketplace subscription, which requires a **validated** payment method. On brand-new accounts the card can take hours (up to ~24h) to propagate to Marketplace, and AWS may still be verifying the account. Add a real (non-prepaid) card in **Billing → Payment preferences**, wait, and retry — or open a free **Account & Billing** support case to expedite. Meanwhile use **Amazon Nova** (no subscription). |
+| `on-demand throughput isn't supported` | You used a bare model id. Use a cross-region **inference-profile** id (`us.anthropic.claude-…`, `global.anthropic.claude-…`) or an Amazon Nova id. |
+| `ThrottlingException: Too many tokens per day` | New-account on-demand quota (can be 0). Raise it in **Service Quotas → Amazon Bedrock**, or wait for AWS to auto-increase as the account matures. |
+| `AccessDeniedException` from Bedrock | Confirm the model is subscribed/available and the Lambda role has `bedrock:Converse` + `aws-marketplace:Subscribe` (both are in the Terraform). |
 | Textract times out | Large multi-page PDFs take longer. The Lambda polls for up to ~30 s. Use smaller test PDFs. |
 | `NoSuchBucket` error | Terraform apply didn't complete. Re-run it. |
+| Bedrock works via the app's **Bedrock API key** field but not via IAM | The bearer token authenticates a principal that already has model access; the IAM path additionally needs the account's Marketplace subscription + valid payment. |
 
 ---
 

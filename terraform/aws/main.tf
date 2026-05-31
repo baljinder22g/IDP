@@ -185,8 +185,9 @@ resource "aws_lambda_function" "idp" {
       INPUT_BUCKET    = aws_s3_bucket.input.bucket
       BEDROCK_MODEL   = var.bedrock_model
       ALLOWED_ORIGIN  = var.allowed_origin
-      API_KEY         = var.api_key
-      BEDROCK_API_KEY = var.bedrock_api_key   # optional baked-in bearer token (see variables.tf)
+      API_KEY           = var.api_key
+      BEDROCK_API_KEY   = var.bedrock_api_key   # optional baked-in bearer token (see variables.tf)
+      BEDROCK_MAX_TOKENS = tostring(var.bedrock_max_tokens)
     }
   }
 }
@@ -261,4 +262,28 @@ resource "aws_lambda_permission" "apigw" {
   function_name = aws_lambda_function.idp.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+###############################################################################
+# Cost guardrail — monthly AWS Budget with email alerts (Bedrock + Textract are
+# the only metered services here). Created only when a budget + email are set.
+###############################################################################
+resource "aws_budgets_budget" "monthly" {
+  count        = var.monthly_budget_usd > 0 && var.budget_alert_email != "" ? 1 : 0
+  name         = "${local.name}-monthly"
+  budget_type  = "COST"
+  limit_amount = tostring(var.monthly_budget_usd)
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  dynamic "notification" {
+    for_each = [50, 80, 100]   # alert at 50%, 80%, 100% of the budget
+    content {
+      comparison_operator        = "GREATER_THAN"
+      threshold                  = notification.value
+      threshold_type             = "PERCENTAGE"
+      notification_type          = "ACTUAL"
+      subscriber_email_addresses = [var.budget_alert_email]
+    }
+  }
 }

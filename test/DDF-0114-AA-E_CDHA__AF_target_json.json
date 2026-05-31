@@ -1,0 +1,40 @@
+{
+  "application": {
+    "application_id": "",
+    "application_date": "",
+    "broker_name": "",
+    "policy_type": "",
+    "requested_cover_amount": "",
+    "currency": ""
+  },
+  "insured": {
+    "full_name": "",
+    "date_of_birth": "",
+    "age": "",
+    "gender": "",
+    "residency_country": "",
+    "nationality": "",
+    "occupation": ""
+  },
+  "financial_profile": {
+    "annual_income": "",
+    "net_worth": "",
+    "source_of_wealth": "",
+    "existing_insurance": ""
+  },
+  "medical_profile": {
+    "height": "",
+    "weight": "",
+    "smoker_or_tobacco": "",
+    "medical_conditions": "",
+    "medications": "",
+    "surgeries_or_hospitalizations": "",
+    "family_medical_history": ""
+  },
+  "underwriting": {
+    "risk_flags": [],
+    "missing_information": [],
+    "free_text_notes": "",
+    "overall_confidence": ""
+  }
+}

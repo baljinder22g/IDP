@@ -26,6 +26,7 @@ MODEL  = os.environ.get("BEDROCK_MODEL", "global.anthropic.claude-sonnet-4-5-202
 # Optional baked-in Bedrock API key (set via the `bedrock_api_key` Terraform
 # variable). If present, we authenticate to Bedrock with this bearer token by
 # default, so the UI doesn't have to supply one. A per-request key always wins.
+MAX_TOKENS = int(os.environ.get("BEDROCK_MAX_TOKENS", "4096"))
 ENV_BEDROCK_KEY = os.environ.get("BEDROCK_API_KEY", "").strip()
 if ENV_BEDROCK_KEY:
     # Must be set BEFORE the bedrock-runtime client is created so botocore
@@ -195,7 +196,7 @@ def handle_bedrock(event, req_id=""):
                 {"document": {"format": "pdf", "name": "broker_doc", "source": {"bytes": pdf_bytes}}},
                 {"text": f"Target JSON schema:\n{schema}\n\nReturn only the populated JSON."},
             ]}],
-            inferenceConfig={"maxTokens": 4096, "temperature": 0},
+            inferenceConfig={"maxTokens": MAX_TOKENS, "temperature": 0},
         )
 
         api_ms = int((time.time() - t_api) * 1000)
@@ -530,7 +531,7 @@ def _bedrock_map(kv, schema, client=None):
     resp = client.converse(
         modelId=MODEL,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={"maxTokens": 4096, "temperature": 0},
+        inferenceConfig={"maxTokens": MAX_TOKENS, "temperature": 0},
     )
     usage = resp.get("usage", {})
     logger.debug(f"bedrock_map tokens: in={usage.get('inputTokens')} out={usage.get('outputTokens')}")
