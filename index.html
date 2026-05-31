@@ -6,7 +6,7 @@
   <title>IDP Studio — Intelligent Document Processing</title>
   <meta name="description" content="End-to-end Intelligent Document Processing (IDP) for insurance broker / underwriting documents using AWS Bedrock, AWS Textract, multi-agent workflows, and Azure Document Intelligence." />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
-  <link rel="stylesheet" href="assets/css/styles.css?v=1.0.0" />
+  <link rel="stylesheet" href="assets/css/styles.css?v=1.1.1" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>" />
 </head>
 <body>
@@ -36,6 +36,7 @@
     <button class="tab" role="tab" data-tab="azure"    aria-selected="false">④&nbsp;Azure Document AI</button>
     <button class="tab" role="tab" data-tab="logs"     aria-selected="false">⑤&nbsp;Logs (S3)</button>
     <button class="tab" role="tab" data-tab="docs"     aria-selected="false">⑥&nbsp;Documentation</button>
+    <button class="tab" role="tab" data-tab="direct"   aria-selected="false">⑦&nbsp;Direct SDK</button>
   </nav>
 
   <main class="content">
@@ -75,9 +76,9 @@
           <label class="field">
             <span>Bedrock model</span>
             <select id="bedrock-model">
-              <option value="anthropic.claude-opus-4-8-v1:0">Claude Opus 4.8 (best quality)</option>
-              <option value="anthropic.claude-sonnet-4-6-v1:0" selected>Claude Sonnet 4.6 (balanced)</option>
-              <option value="anthropic.claude-haiku-4-5-v1:0">Claude Haiku 4.5 (fast/cheap)</option>
+              <option value="us.anthropic.claude-haiku-4-5-20251001-v1:0" selected>Claude Haiku 4.5 (fast / cheapest)</option>
+              <option value="us.anthropic.claude-sonnet-4-5-20250929-v1:0">Claude Sonnet 4.5 — needs Marketplace subscription / billing</option>
+              <option value="global.anthropic.claude-sonnet-4-5-20250929-v1:0">Claude Sonnet 4.5 (global) — needs Marketplace subscription / billing</option>
             </select>
           </label>
           <label class="field checkbox">
@@ -286,6 +287,7 @@
               <option value="textract">Textract</option>
               <option value="agents">Agents</option>
               <option value="azure">Azure</option>
+              <option value="bedrock-direct">Direct SDK</option>
             </select>
           </div>
           <button class="btn-ghost small" id="logs-refresh">↻ Refresh</button>
@@ -312,6 +314,120 @@
       <div class="card docs" id="docs-content"><p class="muted">Loading documentation…</p></div>
     </section>
 
+    <!-- ===================== TAB 7: DIRECT SDK ===================== -->
+    <section class="panel" id="panel-direct" role="tabpanel">
+      <div class="panel-head">
+        <h2>Direct AWS Bedrock SDK Call</h2>
+        <p class="muted">Calls Amazon Bedrock Runtime <strong>directly via the AWS SDK</strong> — no API Gateway or Lambda in the path. Great for Node.js backends, CLI tools, or when you control the execution environment. Compare with Tab ① which routes through API Gateway → Lambda → Bedrock.</p>
+      </div>
+
+      <div class="info-banner">
+        <span class="ib-icon">ℹ</span>
+        <div>
+          <strong>Browser CORS limitation:</strong> AWS Bedrock Runtime does not set CORS headers, so direct browser-to-Bedrock calls are blocked. This tab uses <strong>mock data</strong> in the browser. Enter credentials and copy the <strong>Node.js code below</strong> to run live extractions without API Gateway or Lambda.
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>AWS Credentials <span class="muted small" style="font-weight:400">&nbsp;· stored only in your browser's localStorage, never transmitted</span></h3>
+        <div class="grid-2">
+          <label class="field">
+            <span>Access Key ID</span>
+            <input type="password" id="direct-keyid" placeholder="AKIA…" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Secret Access Key</span>
+            <input type="password" id="direct-secret" placeholder="••••••••" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Session Token <em class="muted">(optional — for STS / Cognito temp creds)</em></span>
+            <input type="password" id="direct-token" placeholder="optional" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>AWS Region</span>
+            <select id="direct-region">
+              <option value="us-east-1">us-east-1 (N. Virginia)</option>
+              <option value="us-west-2">us-west-2 (Oregon)</option>
+              <option value="eu-west-1">eu-west-1 (Ireland)</option>
+              <option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+              <option value="ap-southeast-1">ap-southeast-1 (Singapore)</option>
+              <option value="ap-northeast-1">ap-northeast-1 (Tokyo)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row gap" style="margin-top:12px">
+          <button class="btn-primary small" id="direct-creds-save">Save credentials</button>
+          <button class="btn-ghost small" id="direct-creds-clear">Clear credentials</button>
+          <span class="muted small" id="direct-creds-status"></span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h3>1 · Document</h3>
+          <div class="dropzone" id="direct-drop" data-input="direct">
+            <input type="file" accept="application/pdf" hidden />
+            <div class="dz-inner">
+              <span class="dz-icon">⬆️</span>
+              <p><strong>Click to upload</strong> or drop a PDF here</p>
+              <p class="muted small">Broker documents · PDF only</p>
+            </div>
+          </div>
+          <div class="file-meta" id="direct-file" hidden></div>
+        </div>
+        <div class="card">
+          <h3>2 · Target JSON schema</h3>
+          <p class="muted small">Same schema format as the other tabs — drives what Bedrock extracts.</p>
+          <textarea class="code" id="direct-schema" spellcheck="false" rows="12"></textarea>
+          <div class="row gap">
+            <button class="btn-ghost small" data-load-sample="direct-schema">Load sample schema</button>
+            <button class="btn-ghost small" data-format-json="direct-schema">Format</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>3 · Options</h3>
+        <div class="row gap wrap">
+          <label class="field">
+            <span>Bedrock model</span>
+            <select id="direct-model">
+              <option value="global.anthropic.claude-3-opus-20240229-v1:0">Claude 3 Opus (highest quality)</option>
+              <option value="global.anthropic.claude-sonnet-4-5-20250929-v1:0" selected>Claude 3.5 Sonnet v2 (balanced)</option>
+              <option value="global.anthropic.claude-3-5-haiku-20241022-v1:0">Claude 3.5 Haiku (fast / cheapest)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row gap" style="margin-top:14px">
+          <button class="btn-primary" id="direct-run">▶ Run extraction</button>
+          <button class="btn-ghost" id="direct-clear">Reset</button>
+        </div>
+      </div>
+
+      <div class="card output-card">
+        <div class="row between">
+          <h3>Result</h3>
+          <div class="row gap">
+            <span class="status-chip" id="direct-status">idle</span>
+            <button class="btn-ghost small" data-copy="direct-output">Copy</button>
+            <button class="btn-ghost small" data-download="direct-output">Download</button>
+          </div>
+        </div>
+        <pre class="code output" id="direct-output">// Result will appear here</pre>
+      </div>
+
+      <div class="card">
+        <details>
+          <summary><h3>Node.js SDK code — no API Gateway or Lambda</h3></summary>
+          <p class="muted small" style="margin-top:10px">Install: <code>npm i @aws-sdk/client-bedrock-runtime</code>. Credentials come from env vars, <code>~/.aws/credentials</code>, or an IAM instance role — no secrets in code.</p>
+          <pre class="code output" id="direct-code" style="margin-top:12px; font-size:12px">// Run the extraction first to generate the code snippet.</pre>
+          <div class="row gap" style="margin-top:10px">
+            <button class="btn-ghost small" data-copy="direct-code">Copy code</button>
+          </div>
+        </details>
+      </div>
+    </section>
+
   </main>
 
   <!-- ===================== SETTINGS MODAL ===================== -->
@@ -331,6 +447,11 @@
         <input type="password" id="set-apiKey" placeholder="optional" />
       </label>
       <label class="field">
+        <span>Bedrock API key (bearer token)</span>
+        <input type="password" id="set-bedrockKey" placeholder="bedrock-api-key-… (short-term, ~12h)" />
+        <small class="muted" style="font-weight:400">Short-term Bedrock API key from the AWS console. Sent to your Lambda, which uses it as <code>AWS_BEARER_TOKEN_BEDROCK</code> to call Bedrock — bypassing IAM/Marketplace setup. Leave blank to use the Lambda's IAM role.</small>
+      </label>
+      <label class="field">
         <span>Default cloud for shared endpoints</span>
         <select id="set-cloud"><option value="aws">AWS</option><option value="azure">Azure</option></select>
       </label>
@@ -348,8 +469,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-  <script src="assets/js/config.js?v=1.0.0"></script>
-  <script src="assets/js/api.js?v=1.0.0"></script>
-  <script src="assets/js/app.js?v=1.0.0"></script>
+  <script src="assets/js/config.js?v=1.1.1"></script>
+  <script src="assets/js/api.js?v=1.1.1"></script>
+  <script src="assets/js/app.js?v=1.1.1"></script>
 </body>
 </html>

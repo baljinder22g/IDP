@@ -8,6 +8,7 @@ window.IDP_CONFIG = {
   defaults: {
     apiBase: "",        // empty => mock mode
     apiKey: "",
+    bedrockKey: "",     // optional Bedrock bearer token (AWS_BEARER_TOKEN_BEDROCK)
     cloud: "aws",
   },
 

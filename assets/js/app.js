@@ -7,7 +7,7 @@
   const API = window.IDP_API;
 
   // Holds the currently selected file (base64) per tab.
-  const files = { bedrock: null, textract: null, agents: null, azure: null };
+  const files = { bedrock: null, textract: null, agents: null, azure: null, direct: null };
 
   // ---------------- theme ----------------
   function applyTheme(t) {
@@ -48,6 +48,7 @@
   function openSettings() {
     $("#set-apiBase").value = API.settings.apiBase || "";
     $("#set-apiKey").value = API.settings.apiKey || "";
+    $("#set-bedrockKey").value = API.settings.bedrockKey || "";
     $("#set-cloud").value = API.settings.cloud || "aws";
     modal.hidden = false;
   }
@@ -58,6 +59,7 @@
     API.saveSettings({
       apiBase: $("#set-apiBase").value.trim(),
       apiKey: $("#set-apiKey").value.trim(),
+      bedrockKey: $("#set-bedrockKey").value.trim(),
       cloud: $("#set-cloud").value,
     });
     modal.hidden = true; refreshEnvPill();
@@ -284,6 +286,123 @@
   $("#logs-search").addEventListener("input", renderLogs);
   $("#logs-filter").addEventListener("change", renderLogs);
 
+  // ---------------- TAB 7: Direct SDK ----------------
+  const DIRECT_CREDS_KEY = "idp.direct-creds";
+
+  function loadDirectCreds() {
+    try { return JSON.parse(localStorage.getItem(DIRECT_CREDS_KEY) || "{}"); } catch { return {}; }
+  }
+  function applyDirectCreds(c) {
+    $("#direct-keyid").value = c.accessKeyId || "";
+    $("#direct-secret").value = c.secretAccessKey || "";
+    $("#direct-token").value = c.sessionToken || "";
+    const reg = $("#direct-region");
+    if (c.region && [...reg.options].some((o) => o.value === c.region)) reg.value = c.region;
+  }
+
+  function generateSdkCode(model, region, schemaStr) {
+    const schemaPreview = (() => {
+      try { return JSON.stringify(JSON.parse(schemaStr), null, 2); } catch { return schemaStr || "{}"; }
+    })();
+    return `// Install: npm i @aws-sdk/client-bedrock-runtime
+// Auth: env vars (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY), ~/.aws/credentials, or IAM role
+import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
+import * as fs from "fs";
+
+const client = new BedrockRuntimeClient({ region: "${region || "us-east-1"}" });
+
+const pdfBytes = fs.readFileSync("document.pdf");
+const targetSchema = ${schemaPreview};
+
+const response = await client.send(new InvokeModelCommand({
+  modelId: "${model}",
+  contentType: "application/json",
+  accept: "application/json",
+  body: JSON.stringify({
+    anthropic_version: "bedrock-2023-05-31",
+    max_tokens: 4096,
+    messages: [{
+      role: "user",
+      content: [
+        {
+          type: "document",
+          source: { type: "base64", media_type: "application/pdf", data: pdfBytes.toString("base64") }
+        },
+        {
+          type: "text",
+          text: \`Extract data from the document and return ONLY valid JSON matching this schema:\\n\${JSON.stringify(targetSchema, null, 2)}\`
+        }
+      ]
+    }]
+  })
+}));
+
+const raw = JSON.parse(new TextDecoder().decode(response.body));
+const extracted = JSON.parse(raw.content[0].text);
+console.log(JSON.stringify(extracted, null, 2));`;
+  }
+
+  applyDirectCreds(loadDirectCreds());
+
+  $("#direct-creds-save").addEventListener("click", () => {
+    const c = {
+      accessKeyId: $("#direct-keyid").value.trim(),
+      secretAccessKey: $("#direct-secret").value.trim(),
+      sessionToken: $("#direct-token").value.trim(),
+      region: $("#direct-region").value
+    };
+    localStorage.setItem(DIRECT_CREDS_KEY, JSON.stringify(c));
+    const st = $("#direct-creds-status");
+    st.textContent = "Saved.";
+    setTimeout(() => (st.textContent = ""), 2000);
+  });
+
+  $("#direct-creds-clear").addEventListener("click", () => {
+    localStorage.removeItem(DIRECT_CREDS_KEY);
+    applyDirectCreds({});
+    const st = $("#direct-creds-status");
+    st.textContent = "Cleared.";
+    setTimeout(() => (st.textContent = ""), 2000);
+  });
+
+  $("#direct-run").addEventListener("click", async () => {
+    if (!files.direct) { alert("Upload a PDF first."); return; }
+    const schemaStr = $("#direct-schema").value.trim();
+    if (!schemaStr) { alert("Provide a Target JSON schema."); return; }
+    const model = $("#direct-model").value;
+    const creds = loadDirectCreds();
+    const req = {
+      filename: files.direct.name,
+      size_kb: Math.round(files.direct.size / 1024),
+      document_base64: files.direct.b64,
+      target_schema: schemaStr,
+      model
+    };
+    setStatus("direct-status", "running");
+    show("direct-output", creds.accessKeyId ? "// Calling AWS Bedrock directly via SDK…" : "// No credentials saved — running mock…");
+    $("#direct-run").disabled = true;
+    try {
+      const r = await API.extractBedrockDirect(req, creds);
+      setStatus("direct-status", "succeeded");
+      show("direct-output", r.result);
+      show("direct-code", generateSdkCode(model, creds.region || "us-east-1", schemaStr));
+    } catch (err) {
+      setStatus("direct-status", "error");
+      show("direct-output", "Error: " + err.message);
+      show("direct-code", generateSdkCode(model, creds.region || "us-east-1", schemaStr));
+    } finally {
+      $("#direct-run").disabled = false;
+    }
+  });
+
+  $("#direct-clear").addEventListener("click", () => {
+    files.direct = null;
+    const fm = $("#direct-file"); if (fm) { fm.hidden = true; fm.innerHTML = ""; }
+    show("direct-output", "// Result will appear here");
+    show("direct-code", "// Run the extraction first to generate the code snippet.");
+    setStatus("direct-status", "idle");
+  });
+
   // ---------------- TAB 6: Docs ----------------
   let docsLoaded = false;
   async function loadDocs() {
@@ -300,13 +419,21 @@
     docsLoaded = true;
   }
   function renderMarkdownWithMermaid(el, md) {
-    // Extract ```mermaid blocks, render the rest with marked, then inject diagrams.
-    const blocks = [];
+    // 1. Extract mermaid blocks before any markdown parsing.
+    const mermaidBlocks = [];
     md = md.replace(/```mermaid\n([\s\S]*?)```/g, (_, code) => {
-      blocks.push(code); return `@@MERMAID_${blocks.length - 1}@@`;
+      mermaidBlocks.push(code.trim());
+      return `___MERMAID_${mermaidBlocks.length - 1}___`;
     });
+    // 2. Process markdown inside <details> blocks so collapsible sections render properly.
+    md = md.replace(/<details>([\s\S]*?)<\/details>/gi, (_, inner) => {
+      const parsedInner = window.marked ? marked.parse(inner) : inner;
+      return `<details>${parsedInner}</details>`;
+    });
+    // 3. Parse remaining markdown.
     let html = window.marked ? marked.parse(md) : "<pre>" + md + "</pre>";
-    html = html.replace(/@@MERMAID_(\d+)@@/g, (_, i) => `<div class="mermaid">${blocks[+i]}</div>`);
+    // 4. Inject mermaid diagrams (placeholders may now be inside <p> tags — browsers handle it).
+    html = html.replace(/___MERMAID_(\d+)___/g, (_, i) => `<div class="mermaid">${mermaidBlocks[+i]}</div>`);
     el.innerHTML = html;
     renderDocsDiagrams();
   }
@@ -322,7 +449,7 @@
     refreshEnvPill();
     $("#buildInfo").textContent = "v" + IDP_CONFIG.build;
     // seed schemas
-    ["bedrock-schema", "textract-schema", "azure-schema", "agents-schema"].forEach((id) => {
+    ["bedrock-schema", "textract-schema", "azure-schema", "agents-schema", "direct-schema"].forEach((id) => {
       const el = $("#" + id); if (el && !el.value) el.value = IDP_CONFIG.sampleSchemaStr;
     });
     buildAgentBoxes();

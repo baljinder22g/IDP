@@ -140,6 +140,21 @@
     };
   }
 
+  async function mockBedrockDirect(req) {
+    await wait(1100);
+    const schema = parseSchema(req.target_schema);
+    return {
+      run_id: "sdk_" + Date.now().toString(36),
+      capability: "bedrock-direct",
+      model: req.model,
+      status: "succeeded",
+      latency_ms: 1060,
+      path: "AWS SDK → Bedrock Runtime (no API Gateway / Lambda)",
+      result: fillSchema(schema),
+      _mock: true
+    };
+  }
+
   async function mockAzure(req) {
     await wait(1250);
     const schema = parseSchema(req.target_schema);
@@ -211,12 +226,20 @@
       return e;
     },
 
+    // Attach the optional Bedrock bearer token to any request that hits Bedrock.
+    _withBedrockKey(req) {
+      if (settings.bedrockKey) req.bedrock_api_key = settings.bedrockKey;
+      return req;
+    },
+
     async extractBedrock(req) {
+      req = this._withBedrockKey(req);
       const r = isMock() ? await mockBedrock(req) : await http(IDP_CONFIG.endpoints.bedrock, req);
       this.recordLog({ run_id: r.run_id, capability: "bedrock", model: r.model || req.model, status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/bedrock/" + r.run_id + ".json"), detail: r });
       return r;
     },
     async extractTextract(req) {
+      req = this._withBedrockKey(req);
       const r = isMock() ? await mockTextract(req) : await http(IDP_CONFIG.endpoints.textract, req);
       this.recordLog({ run_id: r.run_id, capability: "textract", model: r.service || "Textract", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/textract/" + r.run_id + ".json"), detail: r });
       return r;
@@ -227,6 +250,7 @@
       return r;
     },
     async runAgents(req, onStep) {
+      req = this._withBedrockKey(req);
       if (isMock()) {
         const r = await mockAgents(req, onStep);
         this.recordLog({ run_id: r.run_id, capability: "agents", model: "multi-agent", status: r.status, latency_ms: r.latency_ms, s3_key: "logs/agents/" + r.run_id + ".json", detail: r });
@@ -238,6 +262,54 @@
       this.recordLog({ run_id: r.run_id, capability: "agents", model: "multi-agent", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/agents/" + r.run_id + ".json"), detail: r });
       return r;
     },
+    async extractBedrockDirect(req, creds) {
+      const hasCreds = creds && creds.accessKeyId && creds.secretAccessKey;
+      if (!hasCreds) {
+        const r = await mockBedrockDirect(req);
+        this.recordLog({ run_id: r.run_id, capability: "bedrock-direct", model: r.model, status: r.status, latency_ms: r.latency_ms, s3_key: "local/sdk-direct/" + r.run_id + ".json", detail: r });
+        return r;
+      }
+      // Attempt a real SDK call via ESM CDN. Will fail in browser due to CORS.
+      try {
+        const { BedrockRuntimeClient, InvokeModelCommand } = await import("https://esm.sh/@aws-sdk/client-bedrock-runtime@3");
+        const client = new BedrockRuntimeClient({
+          region: creds.region || "us-east-1",
+          credentials: {
+            accessKeyId: creds.accessKeyId,
+            secretAccessKey: creds.secretAccessKey,
+            ...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {})
+          }
+        });
+        const prompt = "Extract structured data from the attached PDF and return ONLY valid JSON matching this schema:\n" + req.target_schema;
+        const body = JSON.stringify({
+          anthropic_version: "bedrock-2023-05-31",
+          max_tokens: 4096,
+          messages: [{ role: "user", content: [
+            { type: "document", source: { type: "base64", media_type: "application/pdf", data: req.document_base64 } },
+            { type: "text", text: prompt }
+          ]}]
+        });
+        const t0 = Date.now();
+        const resp = await client.send(new InvokeModelCommand({
+          modelId: req.model,
+          contentType: "application/json",
+          accept: "application/json",
+          body: new TextEncoder().encode(body)
+        }));
+        const decoded = JSON.parse(new TextDecoder().decode(resp.body));
+        const text = decoded.content[0].text;
+        let result; try { result = JSON.parse(text.match(/\{[\s\S]*\}/)[0]); } catch { result = { raw: text }; }
+        const r = { run_id: "sdk_" + Date.now().toString(36), capability: "bedrock-direct", model: req.model, status: "succeeded", latency_ms: Date.now() - t0, path: "AWS SDK → Bedrock Runtime (direct)", result };
+        this.recordLog({ run_id: r.run_id, capability: "bedrock-direct", model: r.model, status: r.status, latency_ms: r.latency_ms, s3_key: "local/sdk-direct/" + r.run_id + ".json", detail: r });
+        return r;
+      } catch (err) {
+        const msg = (err.name === "TypeError" || err.message.toLowerCase().includes("cors") || err.message.toLowerCase().includes("fetch"))
+          ? "CORS blocked: AWS Bedrock Runtime does not allow direct browser calls. Use the Node.js code snippet, or route via API Gateway (Tab ①)."
+          : err.message;
+        throw new Error(msg);
+      }
+    },
+
     async getLogs() {
       if (isMock()) return { items: mockLogStore() };
       try {

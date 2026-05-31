@@ -68,12 +68,24 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         target_schema = body["target_schema"]
 
         content = _analyze_document(pdf, model)
-        result = _map_with_openai(content, target_schema, deployment)
+
+        if AOAI_ENDPOINT and AOAI_KEY:
+            result = _map_with_openai(content, target_schema, deployment)
+            service = f"Azure Document Intelligence ({model}) + Azure OpenAI"
+        else:
+            # OpenAI not configured yet (e.g. quota pending). Still return the
+            # extracted document content so the tab is useful for OCR/layout.
+            result = {
+                "_note": "Azure OpenAI not configured (quota pending). Returning raw Document Intelligence content instead of schema-mapped JSON. Set AOAI_ENDPOINT/AOAI_KEY app settings to enable mapping.",
+                "extracted_content": content[:20000],
+            }
+            service = f"Azure Document Intelligence ({model}) [mapping disabled]"
+
         latency = int((time.time() - t0) * 1000)
 
         out = {
             "run_id": run_id, "capability": "azure",
-            "service": f"Azure Document Intelligence ({model}) + Azure OpenAI",
+            "service": service,
             "status": "succeeded", "latency_ms": latency, "result": result,
         }
         out["s3_key"] = _write_log(run_id, {"model": model, "filename": body.get("filename"),

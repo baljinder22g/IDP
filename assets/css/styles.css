@@ -229,6 +229,22 @@ pre.code, .code.output {
 .docs .mermaid { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 16px 0; text-align: center; }
 .docs a { color: var(--accent); }
 
+/* ---------- info banner ---------- */
+.info-banner {
+  display: flex; gap: 14px; align-items: flex-start;
+  background: rgba(210, 153, 34, 0.1); border: 1px solid rgba(210, 153, 34, 0.35);
+  border-radius: var(--radius); padding: 14px 18px; margin-bottom: 18px; font-size: 13.5px;
+}
+.info-banner .ib-icon { font-size: 18px; flex-shrink: 0; line-height: 1.4; }
+.info-banner a { color: var(--accent); }
+
+/* ---------- SDK code snippet accordion ---------- */
+details summary { list-style: none; cursor: pointer; }
+details summary::-webkit-details-marker { display: none; }
+details summary h3 { display: inline; }
+details[open] summary h3::after { content: " ▲"; font-size: 11px; color: var(--text-muted); }
+details:not([open]) summary h3::after { content: " ▼"; font-size: 11px; color: var(--text-muted); }
+
 /* ---------- footer ---------- */
 .app-footer {
   display: flex; justify-content: space-between; padding: 16px 22px; font-size: 12px;

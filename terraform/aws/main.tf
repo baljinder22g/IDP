@@ -1,14 +1,25 @@
 ###############################################################################
 # IDP Studio — AWS backend
-# Creates: S3 (input + logs), IAM role, 4 Lambdas, HTTP API Gateway, CORS.
-# Implements the contract in api/openapi.yaml for: bedrock, textract, agents, logs.
+#
+# What this creates (one of each):
+#   2 × S3 bucket      — document input (1-day expiry) + processing logs (30-day)
+#   1 × IAM role       — least-privilege role for the Lambda
+#   1 × Lambda         — handler.py routes all 4 API paths in one function
+#   1 × API Gateway    — HTTP API with 4 routes, CORS, throttling
+#   1 × CloudWatch log group
+#
+# Usage:
+#   terraform init
+#   terraform apply
+#   → copy api_base_url output → paste into IDP Studio → Settings
 ###############################################################################
+
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws     = { source = "hashicorp/aws", version = "~> 5.40" }
+    aws     = { source = "hashicorp/aws",     version = "~> 5.40" }
     archive = { source = "hashicorp/archive", version = "~> 2.4" }
-    random  = { source = "hashicorp/random", version = "~> 3.6" }
+    random  = { source = "hashicorp/random",  version = "~> 3.6" }
   }
 }
 
@@ -16,39 +27,29 @@ provider "aws" {
   region = var.region
 }
 
-data "aws_caller_identity" "current" {}
-
 resource "random_id" "suffix" {
-  byte_length = 3
+  byte_length = 3   # adds a 6-char hex suffix so bucket names are globally unique
 }
 
 locals {
-  name        = "${var.project}-${random_id.suffix.hex}"
-  input_bucket = "${local.name}-input"
-  log_bucket   = "${local.name}-logs"
-  lambda_env = {
-    LOG_BUCKET     = aws_s3_bucket.logs.bucket
-    INPUT_BUCKET   = aws_s3_bucket.input.bucket
-    BEDROCK_MODEL  = var.bedrock_model
-    ALLOWED_ORIGIN = var.allowed_origin
-    API_KEY        = var.api_key
-  }
+  name = "${var.project}-${random_id.suffix.hex}"
 }
 
 ###############################################################################
-# S3 buckets
+# S3 — two private buckets
 ###############################################################################
+
 resource "aws_s3_bucket" "input" {
-  bucket        = local.input_bucket
+  bucket        = "${local.name}-input"
   force_destroy = true
 }
 
 resource "aws_s3_bucket" "logs" {
-  bucket        = local.log_bucket
+  bucket        = "${local.name}-logs"
   force_destroy = true
 }
 
-# Block all public access on both buckets
+# Block all public access (these buckets are only touched by Lambda)
 resource "aws_s3_bucket_public_access_block" "input" {
   bucket                  = aws_s3_bucket.input.id
   block_public_acls       = true
@@ -65,12 +66,13 @@ resource "aws_s3_bucket_public_access_block" "logs" {
   restrict_public_buckets = true
 }
 
-# Auto-expire uploaded documents (keep storage free-tier friendly)
+# Auto-delete uploaded PDFs after 1 day; logs after 30 days
 resource "aws_s3_bucket_lifecycle_configuration" "input" {
   bucket = aws_s3_bucket.input.id
   rule {
     id     = "expire-inputs"
     status = "Enabled"
+    filter {}
     expiration { days = 1 }
   }
 }
@@ -80,20 +82,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "logs" {
   rule {
     id     = "expire-logs"
     status = "Enabled"
+    filter {}
     expiration { days = 30 }
   }
 }
 
 ###############################################################################
-# IAM role for Lambdas
+# IAM — Lambda execution role
 ###############################################################################
+
 resource "aws_iam_role" "lambda" {
   name = "${local.name}-lambda-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action    = "sts:AssumeRole"
       Effect    = "Allow"
+      Action    = "sts:AssumeRole"
       Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
@@ -106,30 +110,47 @@ resource "aws_iam_role_policy" "lambda" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "Logs"
-        Effect = "Allow"
-        Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Sid      = "CloudWatchLogs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Sid    = "S3"
+        Sid    = "S3Access"
         Effect = "Allow"
         Action = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
         Resource = [
           aws_s3_bucket.input.arn, "${aws_s3_bucket.input.arn}/*",
-          aws_s3_bucket.logs.arn, "${aws_s3_bucket.logs.arn}/*",
+          aws_s3_bucket.logs.arn,  "${aws_s3_bucket.logs.arn}/*",
         ]
       },
       {
-        Sid    = "Bedrock"
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel", "bedrock:Converse"]
+        Sid      = "BedrockAccess"
+        Effect   = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+          "bedrock:GetFoundationModel",
+          "bedrock:GetInferenceProfile",
+          "bedrock:ListInferenceProfiles",
+        ]
         Resource = "*"
       },
       {
-        Sid    = "Textract"
-        Effect = "Allow"
-        Action = ["textract:StartDocumentAnalysis", "textract:GetDocumentAnalysis", "textract:AnalyzeDocument"]
+        # New Bedrock access flow: foundation models are served via AWS
+        # Marketplace and auto-enabled on first invoke. The calling principal
+        # needs these marketplace actions to complete that one-time subscription.
+        Sid      = "BedrockMarketplace"
+        Effect   = "Allow"
+        Action   = ["aws-marketplace:ViewSubscriptions", "aws-marketplace:Subscribe"]
+        Resource = "*"
+      },
+      {
+        Sid      = "TextractAccess"
+        Effect   = "Allow"
+        Action   = ["textract:StartDocumentAnalysis", "textract:GetDocumentAnalysis", "textract:AnalyzeDocument"]
         Resource = "*"
       }
     ]
@@ -137,45 +158,48 @@ resource "aws_iam_role_policy" "lambda" {
 }
 
 ###############################################################################
-# Lambda packaging — zip the whole lambda/ folder once, reuse for all functions
+# Lambda — single function that handles all routes
 ###############################################################################
+
+# Zip the entire lambda/ directory (handler.py + common.py)
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = "${path.module}/lambda"
   output_path = "${path.module}/build/lambda.zip"
+  excludes    = ["__pycache__", ".gitignore"]
 }
 
-locals {
-  functions = {
-    bedrock  = { handler = "extract_bedrock.handler",      timeout = 60 }
-    textract = { handler = "extract_textract.handler",     timeout = 120 }
-    agents   = { handler = "agents_orchestrator.handler",  timeout = 180 }
-    logs     = { handler = "logs.handler",                 timeout = 30 }
+resource "aws_lambda_function" "idp" {
+  function_name    = "${local.name}-handler"
+  role             = aws_iam_role.lambda.arn
+  runtime          = "python3.12"
+  handler          = "handler.handler"          # file: handler.py, function: handler()
+  filename         = data.archive_file.lambda_zip.output_path
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout          = 180                        # 3 min — covers Textract async polling
+  memory_size      = 512
+
+  environment {
+    variables = {
+      LOG_BUCKET      = aws_s3_bucket.logs.bucket
+      INPUT_BUCKET    = aws_s3_bucket.input.bucket
+      BEDROCK_MODEL   = var.bedrock_model
+      ALLOWED_ORIGIN  = var.allowed_origin
+      API_KEY         = var.api_key
+      BEDROCK_API_KEY = var.bedrock_api_key   # optional baked-in bearer token (see variables.tf)
+    }
   }
 }
 
-resource "aws_lambda_function" "fn" {
-  for_each         = local.functions
-  function_name    = "${local.name}-${each.key}"
-  role             = aws_iam_role.lambda.arn
-  runtime          = "python3.12"
-  handler          = each.value.handler
-  filename         = data.archive_file.lambda_zip.output_path
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  timeout          = each.value.timeout
-  memory_size      = 512
-  environment { variables = local.lambda_env }
-}
-
-resource "aws_cloudwatch_log_group" "fn" {
-  for_each          = local.functions
-  name              = "/aws/lambda/${local.name}-${each.key}"
+resource "aws_cloudwatch_log_group" "idp" {
+  name              = "/aws/lambda/${aws_lambda_function.idp.function_name}"
   retention_in_days = var.log_retention_days
 }
 
 ###############################################################################
-# HTTP API Gateway (v2) with built-in CORS
+# API Gateway (HTTP API v2) — one gateway, four routes, all → one Lambda
 ###############################################################################
+
 resource "aws_apigatewayv2_api" "api" {
   name          = "${local.name}-api"
   protocol_type = "HTTP"
@@ -187,28 +211,37 @@ resource "aws_apigatewayv2_api" "api" {
   }
 }
 
-resource "aws_apigatewayv2_integration" "fn" {
-  for_each               = local.functions
+# One integration → the single Lambda
+resource "aws_apigatewayv2_integration" "idp" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.fn[each.key].invoke_arn
+  integration_uri        = aws_lambda_function.idp.invoke_arn
   payload_format_version = "2.0"
 }
 
-locals {
-  routes = {
-    bedrock  = "POST /v1/extract/bedrock"
-    textract = "POST /v1/extract/textract"
-    agents   = "POST /v1/agents/run"
-    logs     = "GET /v1/logs"
-  }
+# Four routes — all pointing to the same integration
+resource "aws_apigatewayv2_route" "bedrock" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /v1/extract/bedrock"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
 }
 
-resource "aws_apigatewayv2_route" "r" {
-  for_each  = local.routes
+resource "aws_apigatewayv2_route" "textract" {
   api_id    = aws_apigatewayv2_api.api.id
-  route_key = each.value
-  target    = "integrations/${aws_apigatewayv2_integration.fn[each.key].id}"
+  route_key = "POST /v1/extract/textract"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
+resource "aws_apigatewayv2_route" "agents" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /v1/agents/run"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
+resource "aws_apigatewayv2_route" "logs" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /v1/logs"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
 }
 
 resource "aws_apigatewayv2_stage" "prod" {
@@ -216,16 +249,16 @@ resource "aws_apigatewayv2_stage" "prod" {
   name        = "prod"
   auto_deploy = true
   default_route_settings {
-    throttling_burst_limit = 10
-    throttling_rate_limit  = 20
+    throttling_burst_limit = 10   # max concurrent requests
+    throttling_rate_limit  = 20   # requests per second
   }
 }
 
+# Allow API Gateway to invoke the Lambda
 resource "aws_lambda_permission" "apigw" {
-  for_each      = local.functions
-  statement_id  = "AllowAPIGW-${each.key}"
+  statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.fn[each.key].function_name
+  function_name = aws_lambda_function.idp.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
 }

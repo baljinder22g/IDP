@@ -48,6 +48,23 @@ aws configure
 > If `region` in your `terraform.tfvars` is not `us-east-1`, enable models in
 > that region instead. Bedrock + Textract must both exist in that region.
 
+> **Can't enable a model? (no payment method / Marketplace blocked)** New
+> accounts sometimes can't complete the AWS Marketplace subscription that gates
+> Bedrock models (error: `INVALID_PAYMENT_INSTRUMENT` or
+> `aws-marketplace:Subscribe ... not authorized`). Two ways around it:
+> 1. Add a valid card under **Billing → Payment preferences**, then retry.
+> 2. **Use a Bedrock API key (bearer token):** Console → **Bedrock → API keys**
+>    → generate a **long-term** key. Then either set `bedrock_api_key` in
+>    `terraform.tfvars` (baked into the Lambda), **or** paste it per-session into
+>    the app's ⚙️ Settings → *Bedrock API key* field. The backend then calls
+>    Bedrock with the token instead of its IAM role. Short-term keys also work
+>    but expire (~12h).
+>
+> Use a cross-region **inference-profile** model id (e.g.
+> `us.anthropic.claude-haiku-4-5-20251001-v1:0` or a `global.` profile). Bare
+> on-demand ids (`anthropic.claude-...`) return *"on-demand throughput isn't
+> supported"*.
+
 ### A5. Deploy
 ```powershell
 cd terraform\aws
@@ -61,8 +78,10 @@ When it finishes, copy the **`api_base_url`** output.
 ### A6. Point the app at it
 1. Open IDP Studio (GitHub Pages or local).
 2. Click ⚙️ → paste `api_base_url` into **API base URL**.
-3. If you set `api_key` in tfvars, paste the same value into **API key**. Save.
-4. The pill top-right turns green (**Live**). Upload a PDF and run.
+3. If you set `api_key` in tfvars, paste the same value into **API key**.
+4. (Optional) If you're using a Bedrock API key instead of IAM and didn't bake
+   it into `terraform.tfvars`, paste it into **Bedrock API key**. Save.
+5. The pill top-right turns green (**Live**). Upload a PDF and run.
 
 ### A7. Tear down (stop all costs)
 ```powershell
@@ -130,7 +149,7 @@ cd ..\azure        ; terraform init -backend=false ; terraform validate
 
 The Python Lambda/Function code compiles cleanly:
 ```powershell
-python -m py_compile terraform\aws\lambda\*.py
+python -m py_compile terraform\aws\lambda\handler.py terraform\aws\lambda\common.py
 python -m py_compile terraform\azure\function\extract_azure\__init__.py terraform\azure\function\list_logs\__init__.py
 ```
 

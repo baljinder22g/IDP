@@ -7,8 +7,19 @@ region = "us-east-1"
 # allowed_origin = "https://YOUR_GITHUB_USERNAME.github.io"
 allowed_origin = "*"
 
-# Default Bedrock model (must be enabled under Bedrock > Model access).
-bedrock_model = "anthropic.claude-sonnet-4-6-v1:0"
+# Default Bedrock model. Use a cross-region inference profile id (bare
+# on-demand ids like "anthropic.claude-3-5-sonnet-..." are NOT supported).
+# Haiku 4.5 is the cheapest and least likely to need extra Marketplace setup.
+# Switch to a Sonnet profile (e.g. global.anthropic.claude-sonnet-4-5-20250929-v1:0)
+# for higher quality once your account can subscribe to it.
+bedrock_model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 # Optional shared secret. If set, the SPA must send the same value as x-api-key.
 # api_key = "choose-a-long-random-string"
+
+# OPTIONAL Bedrock API key (bearer token). Bake one in here if your account
+# hasn't completed the AWS Marketplace model subscription (e.g. no payment
+# method). The Lambda will then call Bedrock with this token instead of its IAM
+# role. Use a LONG-TERM key (short-term keys expire ~12h). Leave empty to use
+# the IAM role, or to paste a key per-session in the app's Settings instead.
+# bedrock_api_key = "bedrock-api-key-..."

@@ -109,13 +109,14 @@ components:
         document_base64: { type: string, description: Base64-encoded PDF bytes }
         target_schema:   { type: string, description: Desired output as a JSON string (object or JSON Schema) }
         mask_pii:        { type: boolean, default: true, description: Mask PII before writing logs }
+        bedrock_api_key: { type: string, description: "Optional Bedrock API key (bearer token). If supplied, the backend authenticates to Bedrock with this token (AWS_BEARER_TOKEN_BEDROCK) instead of its IAM role. Overrides any baked-in key. Never logged." }
 
     BedrockRequest:
       allOf:
         - $ref: '#/components/schemas/BaseRequest'
         - type: object
           properties:
-            model: { type: string, example: anthropic.claude-sonnet-4-6-v1:0 }
+            model: { type: string, example: anthropic.claude-3-5-sonnet-20241022-v2:0 }
 
     TextractRequest:
       allOf:

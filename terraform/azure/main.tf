@@ -58,6 +58,10 @@ resource "azurerm_application_insights" "ai" {
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   application_type    = "web"
+  # Azure auto-links a Log Analytics workspace to new App Insights; don't fight it.
+  lifecycle {
+    ignore_changes = [workspace_id]
+  }
 }
 
 ###############################################################################
@@ -94,32 +98,35 @@ resource "azurerm_cognitive_deployment" "mapping" {
     name    = var.openai_model
     version = var.openai_model_version
   }
-  sku {
-    name     = "Standard"
+  scale {
+    type     = "Standard"
     capacity = 10
   }
 }
 
 ###############################################################################
-# Function App (Linux, Consumption plan Y1)
+# Function App (Linux) — compute lives in var.functions_location, which may
+# differ from var.location to dodge the new-subscription App Service quota wall.
 ###############################################################################
 resource "azurerm_service_plan" "plan" {
   name                = "${local.name}-plan"
   resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
+  location            = var.functions_location
   os_type             = "Linux"
-  sku_name            = "Y1"
+  sku_name            = var.functions_plan_sku
 }
 
 resource "azurerm_linux_function_app" "fn" {
   name                       = "${local.name}-fn"
   resource_group_name        = azurerm_resource_group.rg.name
-  location                   = azurerm_resource_group.rg.location
+  location                   = var.functions_location
   service_plan_id            = azurerm_service_plan.plan.id
   storage_account_name       = azurerm_storage_account.sa.name
   storage_account_access_key = azurerm_storage_account.sa.primary_access_key
 
   site_config {
+    # always_on must be false on the Y1 Consumption plan, true on dedicated (B1+).
+    always_on = var.functions_plan_sku != "Y1"
     application_stack { python_version = "3.11" }
     cors {
       allowed_origins = [var.allowed_origin]
