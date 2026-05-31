@@ -15,12 +15,28 @@ window.IDP_CONFIG = {
   // Single API contract — these paths match api/openapi.yaml and the
   // routes created by the Terraform (API Gateway / Azure APIM).
   endpoints: {
-    bedrock:  "/v1/extract/bedrock",
-    textract: "/v1/extract/textract",
-    agents:   "/v1/agents/run",
-    azure:    "/v1/extract/azure",
-    logs:     "/v1/logs",
+    bedrock:        "/v1/extract/bedrock",
+    textract:       "/v1/extract/textract",
+    agents:         "/v1/agents/run",
+    agentsExternal: "/v1/agents/run-external",
+    agentsPrepare:  "/v1/agents/prepare",
+    agentsExtract:  "/v1/agents/extract",
+    azure:          "/v1/extract/azure",
+    logs:           "/v1/logs",
   },
+
+  // Default LLM prompt for Tab 4 (insurance underwriting). Editable in the UI.
+  defaultPrompt:
+    "You are an expert insurance underwriting data-extraction assistant. The input is " +
+    "masked key/value text extracted by OCR from an insurance underwriting document " +
+    "(application form, medical questionnaire, KYC/identity page, or financial statement).\n" +
+    "Rules:\n" +
+    "- Return ONLY one JSON object that exactly matches the target schema (same keys and nesting).\n" +
+    "- PRESERVE any placeholder tokens such as [PII_3] EXACTLY as they appear in the source values " +
+    "(they are replaced with real values afterwards).\n" +
+    "- Use null for missing scalar fields and [] for missing arrays. Do not invent values.\n" +
+    "- Treat [X] / 'checked' as the selected option for tick-box / yes-no fields.\n" +
+    "- Include 'extraction_confidence' (0-1) if that field exists in the schema.",
 
   // A realistic Target JSON for HNW insurance broker underwriting docs.
   sampleSchema: {

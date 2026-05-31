@@ -41,16 +41,17 @@ The browser sends a base64-encoded PDF and a **Target JSON schema** (the shape o
 
 ---
 
-## The 4 Extraction Strategies
+## The Extraction Strategies
 
 | Tab | What it does | Best for |
 |-----|-------------|----------|
 | ① **Bedrock** | Sends the PDF directly to a foundation model. One step, highest accuracy. | Any PDF — free text, mixed content |
 | ② **Textract** | OCR + forms/tables analysis — returns **key/values and tables as JSON**. No LLM. Optionally fuzzy-maps the key/values onto your Target JSON schema (deterministic difflib matching, still no model). | Structured forms, tick-boxes, tables |
-| ③ **Agentic** | Pipeline: Ingest → OCR (Textract) → PII Mask → Extract (Bedrock) → Validate. Each step shows its own input/output; if Bedrock access isn't enabled, steps 1–3 still complete and step 4 reports the error. | Demo / understanding the flow |
-| ④ **Azure** | Same idea on Azure (Document Intelligence + Azure OpenAI). | Azure environments |
+| ③ **Agentic (AWS Bedrock)** | Pipeline: Ingest → OCR (Textract) → PII/PHI Mask (Comprehend) → Extract (Bedrock) → Validate. Each step shows its own input/output; if Bedrock access isn't enabled, steps 1–3 still complete and step 4 reports the error. | Demo / understanding the flow |
+| ④ **Agentic (Your LLM)** | Same pipeline as ③ but step 4 calls **your own external model** — Google Gemini, Anthropic Claude, or any OpenAI-compatible endpoint (key entered in the UI). Adds a 6th *Finalize* step. AWS still does OCR + PII/PHI masking; only the masked key/values leave for your LLM. Use when you can't/don't want to use AWS Bedrock. | No-Bedrock setups; bring-your-own-key |
+| ⑤ **Azure** | Same idea on Azure (Document Intelligence + Azure OpenAI). | Azure environments |
 
-Tab ② is **deterministic OCR** (no model, no per-token cost beyond Textract pages); tabs ①/③/④ use a language model for schema-shaped extraction.
+Tab ② is **deterministic OCR** (no model, no per-token cost beyond Textract pages); tabs ①/③/④/⑤ use a language model for schema-shaped extraction. Tab ④'s LLM cost is billed by **your** provider, not AWS.
 
 ---
 
@@ -298,13 +299,51 @@ sequenceDiagram
 ```mermaid
 flowchart LR
   A1["📥 Ingest\nS3 upload"] --> A2["🔎 OCR\nTextract"]
-  A2 --> A3["🛡️ PII Mask\nregex"]
+  A2 --> A3["🛡️ PII/PHI Mask\nComprehend + Medical"]
   A3 --> A4["🧠 Extract\nBedrock"]
   A4 --> A5["✅ Validate\nschema check"]
   A5 --> OUT["Consolidated JSON"]
 ```
 
 <p>All five steps run sequentially inside the same Lambda invocation. Each step returns an <code>{input, output}</code> object that the UI renders as a visible agent box. In a production system these map cleanly onto AWS Step Functions states.</p>
+
+<h2>Tab ④ — Agentic with your own LLM (no Bedrock)</h2>
+
+<p>Runs as <strong>two stages</strong> so you can inspect the OCR + masking before spending on an LLM call, and reuse the same OCR for different prompts/models.</p>
+
+```mermaid
+flowchart LR
+  subgraph S1["Stage 1 — POST /v1/agents/prepare (AWS)"]
+    B1["📥 Ingest\nS3"] --> B2["🔎 OCR\nTextract"]
+    B2 --> B3["🛡️ PII/PHI Mask\nComprehend (unique tokens)"]
+  end
+  subgraph S2["Stage 2 — POST /v1/agents/extract (your LLM)"]
+    B4["🧠 Extract\nYOUR LLM (masked input)"] --> B5["🔓 Unmask\ntokens → real values"]
+    B5 --> B6["📦 Finalize\nvalidate + deliver"]
+  end
+  B3 -->|"run_id + masked JSON"| B4
+  B6 --> OUT2["Delivered JSON (real values)"]
+```
+
+<p><strong>Stage 1 — <code>POST /v1/agents/prepare</code></strong>: ingest → Textract OCR → Comprehend PII/PHI masking. Masking uses <strong>unique reversible tokens</strong> (<code>[PII_1]</code>, <code>[PII_2]</code>…) and stores the <code>{ocr, masked, mask_map}</code> context in S3 under the <code>run_id</code> (expires with the 1-day input bucket). Returns the <strong>OCR key/values (original)</strong> so you can see/copy them, plus the masked key/values.</p>
+
+<p><strong>Stage 2 — <code>POST /v1/agents/extract</code></strong>: takes <code>{run_id, target_schema, prompt, llm}</code>. Loads the masked data + <code>mask_map</code> by <code>run_id</code>, sends only the <strong>masked</strong> values to your LLM with your (editable) prompt, then <strong>un-masks</strong> the result — replacing each <code>[PII_n]</code> token with its original value — and validates against the schema. Final output has <strong>real values</strong>; your LLM never saw the PII/PHI.</p>
+
+<pre><code>// Stage 2 request
+{ "run_id": "run_…", "target_schema": "{...}",
+  "prompt": "…optional; defaults to insurance-underwriting prompt…",
+  "llm": { "provider": "google|anthropic|openai",
+           "api_key": "…", "model": "gemini-2.5-flash",
+           "base_url": "https://api.openai.com/v1" } }   // base_url: openai-compatible only</code></pre>
+
+<table>
+<tr><th>Provider</th><th>Endpoint called by the Lambda</th><th>Auth</th><th>Example model</th></tr>
+<tr><td>google</td><td>generativelanguage.googleapis.com/v1beta/models/{model}:generateContent</td><td>x-goog-api-key</td><td>gemini-2.5-flash</td></tr>
+<tr><td>anthropic</td><td>api.anthropic.com/v1/messages</td><td>x-api-key + anthropic-version</td><td>claude-haiku-4-5</td></tr>
+<tr><td>openai</td><td>{base_url}/chat/completions</td><td>Authorization: Bearer</td><td>gpt-4o-mini</td></tr>
+</table>
+
+<p>The LLM call is made <strong>server-side from the Lambda</strong> (Python <code>urllib</code>, no extra dependencies) — no browser CORS problems. The API key is used in-memory and <strong>never written to S3 or logs</strong> (redacted). The model receives only <em>masked</em> values; PII/PHI is restored locally by the unmask step afterward. <strong>Step-4 cost is billed by your provider, not AWS</strong> (AWS only charges for Textract pages + the cheap Comprehend calls). A one-shot variant <code>POST /v1/agents/run-external</code> also exists (does all 6 steps in one call).</p>
 
 <h2>API Contract</h2>
 
@@ -331,15 +370,19 @@ flowchart LR
 
 <p><strong>Auth:</strong> send the optional shared secret as header <code>x-api-key</code>.</p>
 
-<h2>PII Masking</h2>
+<h2>PII / PHI Masking</h2>
 
-<p>Before any log object is written to S3, <code>common.py:mask_pii()</code> replaces email addresses, phone numbers, and long numeric IDs with <code>[EMAIL]</code>, <code>[PHONE]</code>, <code>[ID]</code>. This runs on both the request data and the extracted result when <code>mask_pii: true</code> (default).</p>
+<p><strong>Log masking (all tabs):</strong> before any log object is written to S3, <code>common.py:mask_pii()</code> replaces email addresses, phone numbers, and long numeric IDs with <code>[EMAIL]</code>, <code>[PHONE]</code>, <code>[ID]</code> when <code>mask_pii: true</code> (default).</p>
+
+<p><strong>Agentic pipeline step 3 (managed models):</strong> the Agentic tab masks the extracted key/values using <strong>Amazon Comprehend</strong> <code>DetectPiiEntities</code> for PII and, when <code>detect_phi: true</code>, <strong>Amazon Comprehend Medical</strong> <code>DetectPHI</code> for PHI. Detected spans are replaced with <code>[TYPE]</code> / <code>[PHI_TYPE]</code> labels. No models are trained — these are AWS's existing managed models. To minimise cost, all values are concatenated so each document needs at most <strong>one Comprehend call + one Comprehend Medical call</strong>; if Comprehend is unavailable it falls back to regex masking.</p>
+
+<p><strong>Cost:</strong> Comprehend PII = $0.0001 / 100 chars (free tier: 5M chars/month for 12 months) → effectively free at this volume. Comprehend Medical PHI = $0.01 / 100 chars (≈$0.10–0.30 per document) — uncheck "Detect PHI" in the UI for PII-only at near-zero cost.</p>
 
 <h2>Security notes</h2>
 
 <ul>
 <li><strong>No secrets in the browser.</strong> All AWS calls happen inside Lambda.</li>
-<li><strong>Least-privilege IAM.</strong> The Lambda role can only touch its two S3 buckets, call Bedrock Converse, and call Textract analyze.</li>
+<li><strong>Least-privilege IAM.</strong> The Lambda role can only touch its two S3 buckets, call Bedrock Converse, Textract analyze, and Comprehend / Comprehend Medical PII+PHI detection.</li>
 <li><strong>Private S3 buckets.</strong> All public access is blocked. Log objects are only accessible through the <code>/v1/logs</code> endpoint.</li>
 <li><strong>Lifecycle expiry.</strong> Input PDFs deleted after 1 day; logs after 30 days.</li>
 <li><strong>Throttling.</strong> API Gateway is set to 10 concurrent / 20 req/s — enough for a demo, blocks runaway loops.</li>

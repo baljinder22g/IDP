@@ -25,9 +25,9 @@ variable "bedrock_api_key" {
     short-term keys expire (~12h). Leave empty to use the IAM role, or to supply
     a key per-request from the app's Settings instead.
   EOT
-  type      = string
-  default   = ""
-  sensitive = true
+  type        = string
+  default     = ""
+  sensitive   = true
 }
 
 variable "allowed_origin" {

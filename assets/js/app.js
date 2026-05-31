@@ -7,7 +7,7 @@
   const API = window.IDP_API;
 
   // Holds the currently selected file (base64) per tab.
-  const files = { bedrock: null, textract: null, agents: null, azure: null, direct: null };
+  const files = { bedrock: null, textract: null, agents: null, external: null, azure: null, direct: null };
 
   // ---------------- theme ----------------
   function applyTheme(t) {
@@ -198,45 +198,60 @@
   const AGENT_DEFS = [
     { id: "ingest", title: "Ingest Agent", icon: "📥", svc: "S3 / pre-flight" },
     { id: "ocr", title: "OCR Agent", icon: "🔎", svc: "AWS Textract" },
-    { id: "pii", title: "PII Masking Agent", icon: "🛡️", svc: "Comprehend / regex" },
+    { id: "pii", title: "PII/PHI Masking Agent", icon: "🛡️", svc: "AWS Comprehend + Medical" },
     { id: "extract", title: "Extraction Agent", icon: "🧠", svc: "AWS Bedrock" },
     { id: "validate", title: "Validation Agent", icon: "✅", svc: "Schema validator" },
   ];
-  function buildAgentBoxes() {
-    const flow = $("#agents-flow"); flow.innerHTML = "";
-    AGENT_DEFS.forEach((a, i) => {
+  const EXTERNAL_DEFS = [
+    { id: "ingest", title: "Ingest Agent", icon: "📥", svc: "S3 / pre-flight" },
+    { id: "ocr", title: "OCR Agent", icon: "🔎", svc: "AWS Textract" },
+    { id: "pii", title: "PII/PHI Masking Agent", icon: "🛡️", svc: "AWS Comprehend + Medical" },
+    { id: "extract", title: "Extraction Agent", icon: "🧠", svc: "Your LLM" },
+    { id: "unmask", title: "Unmasking Agent", icon: "🔓", svc: "Restore original PII/PHI" },
+    { id: "finalize", title: "Finalize Agent", icon: "📦", svc: "Validate + deliver" },
+  ];
+  // Build agent boxes into `flowSel`, id-namespaced by `prefix` so two pipelines coexist.
+  function buildAgentBoxes(flowSel, defs, prefix) {
+    flowSel = flowSel || "#agents-flow"; defs = defs || AGENT_DEFS; prefix = prefix || "";
+    const flow = $(flowSel); flow.innerHTML = "";
+    defs.forEach((a, i) => {
       const box = document.createElement("div");
-      box.className = "agent-box"; box.id = "agent-" + a.id;
+      box.className = "agent-box"; box.id = prefix + "agent-" + a.id;
       box.innerHTML = `
-        <div class="ag-state" id="agstate-${a.id}"></div>
+        <div class="ag-state" id="${prefix}agstate-${a.id}"></div>
         <div class="ag-head"><span class="ag-icon">${a.icon}</span>
           <div><div class="ag-title">${i + 1}. ${a.title}</div><div class="ag-svc">${a.svc}</div></div>
         </div>
         <div class="ag-io">
-          <label>Input</label><pre id="agin-${a.id}">—</pre>
-          <label>Output</label><pre id="agout-${a.id}">—</pre>
+          <label>Input</label><pre id="${prefix}agin-${a.id}">—</pre>
+          <label>Output</label><pre id="${prefix}agout-${a.id}">—</pre>
         </div>`;
       flow.appendChild(box);
     });
   }
-  function updateAgent(id, state, step) {
-    const box = $("#agent-" + id), st = $("#agstate-" + id);
-    if (!box) return;
-    box.classList.remove("active", "done", "error");
-    if (state === "running") { box.classList.add("active"); st.innerHTML = '<span class="spinner"></span>'; }
-    else if (state === "done") {
-      box.classList.add("done"); st.textContent = "✓";
-      if (step) { $("#agin-" + id).textContent = JSON.stringify(step.input, null, 1); $("#agout-" + id).textContent = JSON.stringify(step.output, null, 1); }
-    } else if (state === "error") {
-      box.classList.add("error"); st.textContent = "✕";
-      if (step) {
-        $("#agin-" + id).textContent = JSON.stringify(step.input, null, 1);
-        $("#agout-" + id).textContent = step.error ? ("⚠ " + step.error) : JSON.stringify(step.output, null, 1);
+  // Returns an onStep(id,state,step) callback bound to a prefix.
+  function makeUpdater(prefix) {
+    prefix = prefix || "";
+    return function (id, state, step) {
+      const box = $("#" + prefix + "agent-" + id), st = $("#" + prefix + "agstate-" + id);
+      if (!box) return;
+      box.classList.remove("active", "done", "error");
+      const ain = $("#" + prefix + "agin-" + id), aout = $("#" + prefix + "agout-" + id);
+      if (state === "idle") { st.textContent = ""; if (ain) ain.textContent = "—"; if (aout) aout.textContent = "—"; return; }
+      if (state === "running") { box.classList.add("active"); st.innerHTML = '<span class="spinner"></span>'; }
+      else if (state === "done") {
+        box.classList.add("done"); st.textContent = "✓";
+        if (step) { ain.textContent = JSON.stringify(step.input, null, 1); aout.textContent = JSON.stringify(step.output, null, 1); }
+      } else if (state === "error") {
+        box.classList.add("error"); st.textContent = "✕";
+        if (step) { ain.textContent = JSON.stringify(step.input, null, 1); aout.textContent = step.error ? ("⚠ " + step.error) : JSON.stringify(step.output, null, 1); }
       }
-    }
+    };
   }
+  const updateAgent = makeUpdater("");
   $("#agents-run").addEventListener("click", async () => {
     const base = requireInputs("agents", "agents-schema"); if (!base) return;
+    base.detect_phi = $("#agents-phi").checked;   // PHI via Comprehend Medical (extra cost)
     buildAgentBoxes();
     setStatus("agents-status", "running"); show("agents-output", "// Pipeline running…");
     $("#agents-run").disabled = true;
@@ -258,6 +273,118 @@
     finally { $("#agents-run").disabled = false; }
   });
   $("#agents-clear").addEventListener("click", () => { files.agents = null; buildAgentBoxes(); show("agents-output", "// Final result after all agents complete"); setStatus("agents-status", "idle"); });
+
+  // ---------------- TAB 4: Agentic + Your LLM ----------------
+  const EXT_CREDS_KEY = "idp.external-llm";
+  const EXT_HINTS = {
+    google:    "Gemini. Model e.g. <b>gemini-2.5-flash</b> (cheapest) or gemini-3.5-flash. Key: Google AI Studio → API keys (aistudio.google.com/apikey).",
+    anthropic: "Claude. Model e.g. <b>claude-haiku-4-5</b> (cheapest) or claude-sonnet-4-5. Key: console.anthropic.com → API keys.",
+    openai:    "Any OpenAI-compatible API. Set Base URL (e.g. https://api.openai.com/v1, or Groq/OpenRouter). Model e.g. <b>gpt-4o-mini</b>. Key: your provider's dashboard.",
+  };
+  const EXT_DEFAULT_MODEL = { google: "gemini-2.5-flash", anthropic: "claude-haiku-4-5", openai: "gpt-4o-mini" };
+
+  function extApplyProvider() {
+    const p = $("#external-provider").value;
+    $("#external-hint").innerHTML = EXT_HINTS[p] || "";
+    $("#external-baseurl-field").hidden = (p !== "openai");
+    if (!$("#external-model").value) $("#external-model").value = EXT_DEFAULT_MODEL[p] || "";
+  }
+  function extLoadCreds() {
+    try { return JSON.parse(localStorage.getItem(EXT_CREDS_KEY) || "{}"); } catch { return {}; }
+  }
+  function extApplyCreds(c) {
+    if (c.provider) $("#external-provider").value = c.provider;
+    if (c.model) $("#external-model").value = c.model;
+    if (c.base_url) $("#external-baseurl").value = c.base_url;
+    if (c.api_key) $("#external-key").value = c.api_key;
+    extApplyProvider();
+  }
+  $("#external-provider").addEventListener("change", () => { $("#external-model").value = ""; extApplyProvider(); });
+  extApplyCreds(extLoadCreds());
+
+  $("#external-creds-save").addEventListener("click", () => {
+    const c = { provider: $("#external-provider").value, model: $("#external-model").value.trim(),
+                base_url: $("#external-baseurl").value.trim(), api_key: $("#external-key").value.trim() };
+    localStorage.setItem(EXT_CREDS_KEY, JSON.stringify(c));
+    const st = $("#external-creds-status"); st.textContent = "Saved in this browser."; setTimeout(() => (st.textContent = ""), 2000);
+  });
+  $("#external-creds-clear").addEventListener("click", () => {
+    localStorage.removeItem(EXT_CREDS_KEY); $("#external-key").value = "";
+    const st = $("#external-creds-status"); st.textContent = "Cleared."; setTimeout(() => (st.textContent = ""), 2000);
+  });
+
+  const updateExternalAgent = makeUpdater("ext-");
+  let externalRunId = null;   // set after Stage 1 (prepare)
+
+  // prompt default + reset
+  function extSetDefaultPrompt(force) {
+    const el = $("#external-prompt");
+    if (el && (force || !el.value)) el.value = IDP_CONFIG.defaultPrompt;
+  }
+  $("#external-prompt-reset").addEventListener("click", () => extSetDefaultPrompt(true));
+
+  // ── Stage 1: prepare (steps 1-3) ──
+  $("#external-prepare").addEventListener("click", async () => {
+    const base = requireInputs("external", "external-schema", false); if (!base) return;
+    base.detect_phi = $("#external-phi").checked;
+    buildAgentBoxes("#external-flow", EXTERNAL_DEFS, "ext-");
+    setStatus("external-prep-status", "running");
+    show("external-ocr", "// running OCR…"); show("external-masked", "// masking…");
+    $("#external-prepare").disabled = true; externalRunId = null;
+    $("#external-run").disabled = true; $("#external-run-hint").textContent = "Running Stage 1…";
+    try {
+      const r = await API.agentsPrepare(base, updateExternalAgent);
+      externalRunId = r.run_id;
+      show("external-ocr", r.ocr_keyvalues || {});
+      show("external-masked", r.masked_keyvalues || {});
+      setStatus("external-prep-status", "succeeded");
+      $("#external-run").disabled = false;
+      $("#external-run-hint").textContent = "Stage 1 done (run_id " + r.run_id + "). Now run Stage 2.";
+    } catch (err) {
+      setStatus("external-prep-status", "error"); show("external-masked", "Error: " + err.message);
+      $("#external-run-hint").textContent = "Stage 1 failed.";
+    } finally { $("#external-prepare").disabled = false; }
+  });
+
+  // ── Stage 2: extract + unmask (steps 4-6) ──
+  $("#external-run").addEventListener("click", async () => {
+    if (!externalRunId) { alert("Run Stage 1 (OCR + Masking) first."); return; }
+    const api_key = $("#external-key").value.trim();
+    const model = $("#external-model").value.trim();
+    if (!api_key) { alert("Enter your LLM API key."); return; }
+    if (!model) { alert("Enter a model id."); return; }
+    const req = {
+      run_id: externalRunId,
+      target_schema: $("#external-schema").value.trim(),
+      prompt: $("#external-prompt").value.trim(),
+      llm: { provider: $("#external-provider").value, api_key, model, base_url: $("#external-baseurl").value.trim() },
+    };
+    // reset just the stage-2 boxes
+    ["extract", "unmask", "finalize"].forEach((id) => updateExternalAgent(id, "idle"));
+    setStatus("external-status", "running"); show("external-output", "// Calling your LLM, then unmasking…");
+    $("#external-run").disabled = true;
+    try {
+      const r = await API.agentsExtract(req, updateExternalAgent);
+      if (r.status === "succeeded") {
+        setStatus("external-status", "succeeded"); show("external-output", r.result);
+      } else {
+        setStatus("external-status", "error");
+        show("external-output", { status: r.status, note: "Your LLM call (step 4) failed — check provider/model/key.",
+          failed_step: r.failed_step || "extract", error: r.error, message: r.message });
+      }
+    } catch (err) { setStatus("external-status", "error"); show("external-output", "Error: " + err.message); }
+    finally { $("#external-run").disabled = false; }
+  });
+
+  $("#external-clear").addEventListener("click", () => {
+    files.external = null; externalRunId = null;
+    const m = $("#external-file"); if (m) m.hidden = true;
+    buildAgentBoxes("#external-flow", EXTERNAL_DEFS, "ext-");
+    show("external-ocr", "// run Stage 1 to see OCR JSON"); show("external-masked", "// masked JSON appears here");
+    show("external-output", "// Final result after Stage 2");
+    setStatus("external-prep-status", "idle"); setStatus("external-status", "idle");
+    $("#external-run").disabled = true; $("#external-run-hint").textContent = "Run Stage 1 first.";
+  });
 
   // ---------------- TAB 4: Azure ----------------
   $("#azure-run").addEventListener("click", async () => {
@@ -474,10 +601,12 @@ console.log(JSON.stringify(extracted, null, 2));`;
     refreshEnvPill();
     $("#buildInfo").textContent = "v" + IDP_CONFIG.build;
     // seed schemas
-    ["bedrock-schema", "azure-schema", "agents-schema", "direct-schema"].forEach((id) => {
+    ["bedrock-schema", "azure-schema", "agents-schema", "external-schema", "direct-schema"].forEach((id) => {
       const el = $("#" + id); if (el && !el.value) el.value = IDP_CONFIG.sampleSchemaStr;
     });
     buildAgentBoxes();
+    buildAgentBoxes("#external-flow", EXTERNAL_DEFS, "ext-");
+    extSetDefaultPrompt();
     if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: "dark" });
   }
   init();

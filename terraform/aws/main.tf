@@ -17,9 +17,9 @@
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
-    aws     = { source = "hashicorp/aws",     version = "~> 5.40" }
+    aws     = { source = "hashicorp/aws", version = "~> 5.40" }
     archive = { source = "hashicorp/archive", version = "~> 2.4" }
-    random  = { source = "hashicorp/random",  version = "~> 3.6" }
+    random  = { source = "hashicorp/random", version = "~> 3.6" }
   }
 }
 
@@ -28,7 +28,7 @@ provider "aws" {
 }
 
 resource "random_id" "suffix" {
-  byte_length = 3   # adds a 6-char hex suffix so bucket names are globally unique
+  byte_length = 3 # adds a 6-char hex suffix so bucket names are globally unique
 }
 
 locals {
@@ -121,12 +121,12 @@ resource "aws_iam_role_policy" "lambda" {
         Action = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
         Resource = [
           aws_s3_bucket.input.arn, "${aws_s3_bucket.input.arn}/*",
-          aws_s3_bucket.logs.arn,  "${aws_s3_bucket.logs.arn}/*",
+          aws_s3_bucket.logs.arn, "${aws_s3_bucket.logs.arn}/*",
         ]
       },
       {
-        Sid      = "BedrockAccess"
-        Effect   = "Allow"
+        Sid    = "BedrockAccess"
+        Effect = "Allow"
         Action = [
           "bedrock:InvokeModel",
           "bedrock:InvokeModelWithResponseStream",
@@ -152,6 +152,13 @@ resource "aws_iam_role_policy" "lambda" {
         Effect   = "Allow"
         Action   = ["textract:StartDocumentAnalysis", "textract:GetDocumentAnalysis", "textract:AnalyzeDocument"]
         Resource = "*"
+      },
+      {
+        # PII/PHI masking in the agentic pipeline (existing managed models, no training)
+        Sid      = "ComprehendAccess"
+        Effect   = "Allow"
+        Action   = ["comprehend:DetectPiiEntities", "comprehendmedical:DetectPHI"]
+        Resource = "*"
       }
     ]
   })
@@ -173,20 +180,20 @@ resource "aws_lambda_function" "idp" {
   function_name    = "${local.name}-handler"
   role             = aws_iam_role.lambda.arn
   runtime          = "python3.12"
-  handler          = "handler.handler"          # file: handler.py, function: handler()
+  handler          = "handler.handler" # file: handler.py, function: handler()
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  timeout          = 180                        # 3 min — covers Textract async polling
+  timeout          = 180 # 3 min — covers Textract async polling
   memory_size      = 512
 
   environment {
     variables = {
-      LOG_BUCKET      = aws_s3_bucket.logs.bucket
-      INPUT_BUCKET    = aws_s3_bucket.input.bucket
-      BEDROCK_MODEL   = var.bedrock_model
-      ALLOWED_ORIGIN  = var.allowed_origin
-      API_KEY           = var.api_key
-      BEDROCK_API_KEY   = var.bedrock_api_key   # optional baked-in bearer token (see variables.tf)
+      LOG_BUCKET         = aws_s3_bucket.logs.bucket
+      INPUT_BUCKET       = aws_s3_bucket.input.bucket
+      BEDROCK_MODEL      = var.bedrock_model
+      ALLOWED_ORIGIN     = var.allowed_origin
+      API_KEY            = var.api_key
+      BEDROCK_API_KEY    = var.bedrock_api_key # optional baked-in bearer token (see variables.tf)
       BEDROCK_MAX_TOKENS = tostring(var.bedrock_max_tokens)
     }
   }
@@ -239,6 +246,24 @@ resource "aws_apigatewayv2_route" "agents" {
   target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
 }
 
+resource "aws_apigatewayv2_route" "agents_external" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /v1/agents/run-external"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
+resource "aws_apigatewayv2_route" "agents_prepare" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /v1/agents/prepare"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
+resource "aws_apigatewayv2_route" "agents_extract" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /v1/agents/extract"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
 resource "aws_apigatewayv2_route" "logs" {
   api_id    = aws_apigatewayv2_api.api.id
   route_key = "GET /v1/logs"
@@ -250,8 +275,8 @@ resource "aws_apigatewayv2_stage" "prod" {
   name        = "prod"
   auto_deploy = true
   default_route_settings {
-    throttling_burst_limit = 10   # max concurrent requests
-    throttling_rate_limit  = 20   # requests per second
+    throttling_burst_limit = 10 # max concurrent requests
+    throttling_rate_limit  = 20 # requests per second
   }
 }
 
@@ -277,7 +302,7 @@ resource "aws_budgets_budget" "monthly" {
   time_unit    = "MONTHLY"
 
   dynamic "notification" {
-    for_each = [50, 80, 100]   # alert at 50%, 80%, 100% of the budget
+    for_each = [50, 80, 100] # alert at 50%, 80%, 100% of the budget
     content {
       comparison_operator        = "GREATER_THAN"
       threshold                  = notification.value

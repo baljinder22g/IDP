@@ -10,6 +10,7 @@ Every step is logged so CloudWatch gives full visibility without needing
 the Lambda console code editor (which doesn't work for zip deployments).
 """
 import base64, difflib, json, logging, os, re, time, traceback
+import urllib.request, urllib.error
 import boto3
 from common import (
     respond, parse_body, new_run_id, write_log, mask_pii,
@@ -42,9 +43,11 @@ logger.info(f"INPUT_BUCKET={INPUT_BUCKET}")
 logger.info(f"bedrock_auth_default={'bearer_token(env)' if ENV_BEDROCK_KEY else 'iam_role'}")
 logger.info("==================")
 
-bedrock  = boto3.client("bedrock-runtime", region_name=REGION)
-textract = boto3.client("textract",         region_name=REGION)
-s3       = boto3.client("s3")
+bedrock    = boto3.client("bedrock-runtime",  region_name=REGION)
+textract   = boto3.client("textract",         region_name=REGION)
+comprehend = boto3.client("comprehend",       region_name=REGION)
+cmedical   = boto3.client("comprehendmedical", region_name=REGION)
+s3         = boto3.client("s3")
 logger.info(f"boto3={boto3.__version__}")
 
 
@@ -82,6 +85,8 @@ def _safe_body_log(body: dict) -> dict:
             out[k] = f"<base64 {len(v)} chars ≈ {len(v)*3//4//1024} KB>"
         elif k == "bedrock_api_key":
             out[k] = "***redacted***"          # never log the bearer token
+        elif k == "llm" and isinstance(v, dict):
+            out[k] = {**v, "api_key": "***redacted***" if v.get("api_key") else ""}
         else:
             out[k] = v
     return out
@@ -135,10 +140,13 @@ def handler(event, context):
 
     # Route
     logger.info(f"Routing → {method} {path}")
-    if path == "/v1/extract/bedrock"  and method == "POST": return handle_bedrock(event, req_id)
-    if path == "/v1/extract/textract" and method == "POST": return handle_textract(event, req_id)
-    if path == "/v1/agents/run"       and method == "POST": return handle_agents(event, req_id)
-    if path == "/v1/logs"             and method == "GET":  return handle_logs(event, req_id)
+    if path == "/v1/extract/bedrock"   and method == "POST": return handle_bedrock(event, req_id)
+    if path == "/v1/extract/textract"  and method == "POST": return handle_textract(event, req_id)
+    if path == "/v1/agents/run"        and method == "POST": return handle_agents(event, req_id)
+    if path == "/v1/agents/run-external" and method == "POST": return handle_agents_external(event, req_id)
+    if path == "/v1/agents/prepare"    and method == "POST": return handle_prepare(event, req_id)
+    if path == "/v1/agents/extract"    and method == "POST": return handle_extract(event, req_id)
+    if path == "/v1/logs"              and method == "GET":  return handle_logs(event, req_id)
 
     logger.error(f"No route matched: {method} {path}")
     return respond(404, {"error": "not_found", "path": path, "method": method})
@@ -374,14 +382,23 @@ def handle_agents(event, req_id=""):
         steps.append(_step("ocr", "OCR Agent", "🔎", "AWS Textract",
                            {"s3_key": s3_key}, {"kv_pairs": len(kv), "blocks": len(blocks)}))
 
-        # ── Step 3: PII Mask
-        logger.info("── STEP 3: PII Mask ──")
-        masked     = mask_pii(kv)
-        pii_fields = [k for k, v in kv.items() if v != masked.get(k)]
-        logger.info(f"Step 3 DONE: PII | masked_fields={pii_fields}")
-        steps.append(_step("pii", "PII Masking Agent", "🛡️", "regex",
-                           {"kv_pairs": len(kv)},
-                           {"pii_found": len(pii_fields), "masked_fields": pii_fields}))
+        # ── Step 3: PII + PHI Mask (AWS Comprehend / Comprehend Medical)
+        logger.info("── STEP 3: PII/PHI Mask (Comprehend) ──")
+        detect_phi = body.get("detect_phi", True)
+        try:
+            masked, _mm, cstats = _comprehend_mask(kv, do_phi=detect_phi)
+        except Exception as ce:
+            logger.warning(f"Comprehend unavailable, falling back to regex: {ce}")
+            masked = mask_pii(kv)
+            cstats = {"engine": "regex (Comprehend unavailable)", "pii_entities": 0,
+                      "phi_entities": 0, "types": []}
+        masked_fields = [k for k in kv if kv[k] != masked.get(k)]
+        logger.info(f"Step 3 DONE: PII/PHI | engine={cstats['engine']} | "
+                    f"pii={cstats['pii_entities']} phi={cstats['phi_entities']} | masked_fields={len(masked_fields)}")
+        steps.append(_step("pii", "PII/PHI Masking Agent", "🛡️", cstats["engine"],
+                           {"kv_pairs": len(kv), "detect_phi": detect_phi},
+                           {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
+                            "entity_types": cstats["types"], "masked_fields": masked_fields}))
 
         # ── Step 4: Extract (Bedrock) — isolated so steps 1-3 are preserved if it fails
         logger.info(f"── STEP 4: Extract (Bedrock model={MODEL}) ──")
@@ -403,6 +420,7 @@ def handle_agents(event, req_id=""):
                 "run_id": run_id, "capability": "agents",
                 "status": "failed_at_extract", "failed_step": "extract",
                 "latency_ms": latency, "steps": steps, "result": None,
+                "ocr_keyvalues": kv, "masked_keyvalues": masked,
                 "error": "bedrock_failed", "message": str(be),
             }
             out["s3_key"] = write_log(s3, "agents", run_id,
@@ -421,7 +439,8 @@ def handle_agents(event, req_id=""):
 
         latency = int((time.time() - t0) * 1000)
         out = {"run_id": run_id, "capability": "agents", "status": "succeeded",
-               "latency_ms": latency, "steps": steps, "result": result}
+               "latency_ms": latency, "steps": steps, "result": result,
+               "ocr_keyvalues": kv, "masked_keyvalues": masked}
         logger.info(f"Writing S3 log ...")
         out["s3_key"] = write_log(s3, "agents", run_id,
                                   {"filename": fname, "steps": steps, "result": result},
@@ -438,6 +457,265 @@ def handle_agents(event, req_id=""):
         write_log(s3, "agents", run_id, {"error": str(e), "traceback": tb, "steps": steps}, mask=True)
         return respond(500, {"error": "agents_failed", "message": str(e),
                              "run_id": run_id, "steps": steps})
+
+
+# ── POST /v1/agents/run-external ──────────────────────────────────────────────
+# Clone of the agentic pipeline, but step 4 calls a caller-supplied EXTERNAL LLM
+# (Google Gemini / Anthropic / OpenAI-compatible) instead of AWS Bedrock.
+# Steps: 1 Ingest → 2 OCR (Textract) → 3 PII/PHI mask (Comprehend) →
+#        4 Extract (your LLM) → 5 Validate → 6 Finalize/deliver.
+
+def handle_agents_external(event, req_id=""):
+    run_id = new_run_id()
+    t0 = time.time()
+    logger.info(_sep("AGENTS-EXTERNAL START"))
+    logger.info(f"run_id={run_id}")
+
+    steps = []
+    try:
+        body       = parse_body(event)
+        fname      = body.get("filename", "document.pdf")
+        schema     = body.get("target_schema", "{}")
+        mask       = body.get("mask_pii", True)
+        detect_phi = body.get("detect_phi", True)
+        llm        = body.get("llm") or {}
+        provider   = (llm.get("provider") or "?")
+        model      = llm.get("model", "")
+        logger.info(f"filename={fname} | provider={provider} | model={model} | detect_phi={detect_phi}")
+
+        pdf_bytes = base64.b64decode(body["document_base64"])
+
+        # ── Step 1: Ingest
+        s3_key = f"input/{run_id}.pdf"
+        s3.put_object(Bucket=INPUT_BUCKET, Key=s3_key, Body=pdf_bytes, ContentType="application/pdf")
+        steps.append(_step("ingest", "Ingest Agent", "📥", "S3",
+                           {"file": fname, "size_kb": round(len(pdf_bytes) / 1024)},
+                           {"stored": f"s3://{INPUT_BUCKET}/{s3_key}"}))
+
+        # ── Step 2: OCR (Textract)
+        job_id = textract.start_document_analysis(
+            DocumentLocation={"S3Object": {"Bucket": INPUT_BUCKET, "Name": s3_key}},
+            FeatureTypes=["FORMS", "TABLES"])["JobId"]
+        blocks = _textract_poll(job_id)
+        kv = _key_values(blocks)
+        steps.append(_step("ocr", "OCR Agent", "🔎", "AWS Textract",
+                           {"s3_key": s3_key}, {"kv_pairs": len(kv), "blocks": len(blocks)}))
+
+        # ── Step 3: PII/PHI mask (Comprehend) — UNIQUE tokens so we can reverse it
+        try:
+            masked, mask_map, cstats = _comprehend_mask(kv, do_phi=detect_phi, unique=True)
+        except Exception as ce:
+            logger.warning(f"Comprehend unavailable, regex fallback: {ce}")
+            masked, mask_map = mask_pii(kv), {}
+            cstats = {"engine": "regex (Comprehend unavailable)", "pii_entities": 0,
+                      "phi_entities": 0, "types": []}
+        masked_fields = [k for k in kv if kv[k] != masked.get(k)]
+        steps.append(_step("pii", "PII/PHI Masking Agent", "🛡️", cstats["engine"],
+                           {"kv_pairs": len(kv), "detect_phi": detect_phi},
+                           {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
+                            "entity_types": cstats["types"], "masked_fields": masked_fields}))
+
+        # ── Step 4: Extract via the caller's EXTERNAL LLM (masked input)
+        logger.info(f"── STEP 4: Extract (external LLM provider={provider}) ──")
+        try:
+            prompt = _build_extract_prompt(body.get("prompt"), masked, schema)
+            masked_result, prov = _call_external_llm(llm, prompt)
+            steps.append(_step("extract", f"Extraction Agent · {provider}", "🧠",
+                               f"External LLM: {provider}/{model}",
+                               {"provider": provider, "model": model}, masked_result))
+        except Exception as le:
+            logger.error(f"Step 4 FAILED: external LLM | {type(le).__name__}: {le}")
+            estep = _step("extract", f"Extraction Agent · {provider}", "🧠",
+                          f"External LLM: {provider}/{model}",
+                          {"provider": provider, "model": model}, None)
+            estep["status"] = "error"
+            estep["error"]  = f"{type(le).__name__}: {le}"
+            steps.append(estep)
+            latency = int((time.time() - t0) * 1000)
+            out = {"run_id": run_id, "capability": "agents-external",
+                   "status": "failed_at_extract", "failed_step": "extract",
+                   "latency_ms": latency, "steps": steps, "result": None,
+                   "ocr_keyvalues": kv, "masked_keyvalues": masked,
+                   "error": "llm_failed", "message": str(le)}
+            out["s3_key"] = write_log(s3, "agents-external", run_id,
+                                      {"filename": fname, "provider": provider, "model": model,
+                                       "steps": steps, "error": str(le)}, mask=mask)
+            return respond(200, out)
+
+        # ── Step 5: Unmask — replace [PII_n] tokens with original values
+        result = _unmask(masked_result, mask_map)
+        steps.append(_step("unmask", "Unmasking Agent", "🔓", "Restore original PII/PHI",
+                           {"tokens": len(mask_map)}, {"restored": len(mask_map)}))
+
+        # ── Step 6: Finalize / validate / deliver
+        missing = _validate(result, schema)
+        final = {"target_json": result, "provider": provider, "model": model,
+                 "valid": not missing, "missing_required": missing,
+                 "pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"]}
+        steps.append(_step("finalize", "Finalize Agent", "📦", "Validate + deliver",
+                           {"fields": len(result) if isinstance(result, dict) else 0},
+                           {"delivered": True, "schema_valid": not missing, "missing_required": missing}))
+
+        latency = int((time.time() - t0) * 1000)
+        out = {"run_id": run_id, "capability": "agents-external", "status": "succeeded",
+               "latency_ms": latency, "steps": steps, "result": result, "final": final,
+               "ocr_keyvalues": kv, "masked_keyvalues": masked}
+        out["s3_key"] = write_log(s3, "agents-external", run_id,
+                                  {"filename": fname, "provider": provider, "model": model,
+                                   "steps": steps, "result": result}, mask=mask)
+        logger.info(f"AGENTS-EXTERNAL SUCCESS | run_id={run_id} | provider={provider} | ms={latency}")
+        return respond(200, out)
+
+    except Exception as e:
+        latency = int((time.time() - t0) * 1000)
+        tb = traceback.format_exc()
+        logger.error(f"AGENTS-EXTERNAL FAILED | run_id={run_id} | {type(e).__name__}: {e}")
+        logger.error(f"Traceback:\n{tb}")
+        write_log(s3, "agents-external", run_id, {"error": str(e), "traceback": tb, "steps": steps}, mask=True)
+        return respond(500, {"error": "agents_external_failed", "message": str(e),
+                             "run_id": run_id, "steps": steps})
+
+
+# ── POST /v1/agents/prepare  (Tab 4 part 1: steps 1-3) ────────────────────────
+# Ingest → Textract OCR → Comprehend PII/PHI mask (UNIQUE tokens). Stores the
+# original kv + masked kv + reversible mask_map in S3 under the run_id so the
+# follow-up /extract call can run the LLM and then un-mask. Returns the OCR JSON
+# (so the user can see/copy it) and the masked JSON.
+
+def handle_prepare(event, req_id=""):
+    run_id = new_run_id()
+    t0 = time.time()
+    logger.info(_sep("PREPARE START")); logger.info(f"run_id={run_id}")
+    steps = []
+    try:
+        body       = parse_body(event)
+        fname      = body.get("filename", "document.pdf")
+        detect_phi = body.get("detect_phi", True)
+        pdf_bytes  = base64.b64decode(body["document_base64"])
+
+        # Step 1: Ingest
+        s3_key = f"input/{run_id}.pdf"
+        s3.put_object(Bucket=INPUT_BUCKET, Key=s3_key, Body=pdf_bytes, ContentType="application/pdf")
+        steps.append(_step("ingest", "Ingest Agent", "📥", "S3",
+                           {"file": fname, "size_kb": round(len(pdf_bytes) / 1024)},
+                           {"stored": f"s3://{INPUT_BUCKET}/{s3_key}"}))
+
+        # Step 2: OCR
+        job_id = textract.start_document_analysis(
+            DocumentLocation={"S3Object": {"Bucket": INPUT_BUCKET, "Name": s3_key}},
+            FeatureTypes=["FORMS", "TABLES"])["JobId"]
+        blocks = _textract_poll(job_id)
+        kv = _key_values(blocks)
+        steps.append(_step("ocr", "OCR Agent", "🔎", "AWS Textract",
+                           {"s3_key": s3_key}, {"kv_pairs": len(kv), "blocks": len(blocks)}))
+
+        # Step 3: PII/PHI mask (unique tokens, reversible)
+        try:
+            masked, mask_map, cstats = _comprehend_mask(kv, do_phi=detect_phi, unique=True)
+        except Exception as ce:
+            logger.warning(f"Comprehend unavailable, regex fallback: {ce}")
+            masked, mask_map = mask_pii(kv), {}
+            cstats = {"engine": "regex (Comprehend unavailable)", "pii_entities": 0,
+                      "phi_entities": 0, "types": []}
+        steps.append(_step("pii", "PII/PHI Masking Agent", "🛡️", cstats["engine"],
+                           {"kv_pairs": len(kv), "detect_phi": detect_phi},
+                           {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
+                            "entity_types": cstats["types"]}))
+
+        # Persist the reversible context for /extract (expires with the bucket, 1 day)
+        s3.put_object(Bucket=INPUT_BUCKET, Key=f"prepare/{run_id}.json",
+                      Body=json.dumps({"ocr": kv, "masked": masked, "mask_map": mask_map}).encode("utf-8"),
+                      ContentType="application/json")
+
+        latency = int((time.time() - t0) * 1000)
+        out = {"run_id": run_id, "capability": "prepare", "status": "succeeded",
+               "latency_ms": latency, "steps": steps,
+               "ocr_keyvalues": kv, "masked_keyvalues": masked,
+               "entities": {"pii": cstats["pii_entities"], "phi": cstats["phi_entities"],
+                            "types": cstats["types"], "tokens": len(mask_map)}}
+        write_log(s3, "agents-external", run_id,
+                  {"phase": "prepare", "filename": fname, "steps": steps}, mask=True)
+        logger.info(f"PREPARE SUCCESS | run_id={run_id} | kv={len(kv)} | tokens={len(mask_map)}")
+        return respond(200, out)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"PREPARE FAILED | {type(e).__name__}: {e}\n{tb}")
+        return respond(500, {"error": "prepare_failed", "message": str(e), "run_id": run_id, "steps": steps})
+
+
+# ── POST /v1/agents/extract  (Tab 4 part 2: steps 4-6) ────────────────────────
+# Loads the prepared masked kv + mask_map by run_id, runs the caller's LLM on
+# the MASKED data, then UN-MASKS the result so the final JSON has real values.
+
+def handle_extract(event, req_id=""):
+    t0 = time.time()
+    logger.info(_sep("EXTRACT START"))
+    steps = []
+    try:
+        body     = parse_body(event)
+        run_id   = body.get("run_id")
+        schema   = body.get("target_schema", "{}")
+        llm      = body.get("llm") or {}
+        provider = (llm.get("provider") or "?")
+        model    = llm.get("model", "")
+        if not run_id:
+            return respond(400, {"error": "missing_run_id", "message": "Run 'prepare' (steps 1-3) first."})
+
+        # Load the prepared, reversible context
+        try:
+            ctx = json.loads(s3.get_object(Bucket=INPUT_BUCKET, Key=f"prepare/{run_id}.json")["Body"].read())
+        except Exception:
+            return respond(404, {"error": "prepare_not_found",
+                                 "message": "No prepared data for this run_id (it may have expired). Re-run steps 1-3."})
+        masked, mask_map = ctx.get("masked", {}), ctx.get("mask_map", {})
+        logger.info(f"run_id={run_id} | provider={provider} | model={model} | tokens={len(mask_map)}")
+
+        # Step 4: Extract via external LLM (masked input)
+        try:
+            prompt = _build_extract_prompt(body.get("prompt"), masked, schema)
+            masked_result, prov = _call_external_llm(llm, prompt)
+            steps.append(_step("extract", f"Extraction Agent · {provider}", "🧠",
+                               f"External LLM: {provider}/{model}",
+                               {"provider": provider, "model": model}, masked_result))
+        except Exception as le:
+            logger.error(f"Step 4 FAILED: external LLM | {type(le).__name__}: {le}")
+            estep = _step("extract", f"Extraction Agent · {provider}", "🧠",
+                          f"External LLM: {provider}/{model}", {"provider": provider, "model": model}, None)
+            estep["status"] = "error"; estep["error"] = f"{type(le).__name__}: {le}"
+            steps.append(estep)
+            out = {"run_id": run_id, "capability": "agents-external", "status": "failed_at_extract",
+                   "failed_step": "extract", "steps": steps, "result": None,
+                   "error": "llm_failed", "message": str(le)}
+            write_log(s3, "agents-external", run_id, {"phase": "extract", "provider": provider,
+                      "model": model, "error": str(le)}, mask=True)
+            return respond(200, out)
+
+        # Step 5: Unmask
+        result = _unmask(masked_result, mask_map)
+        steps.append(_step("unmask", "Unmasking Agent", "🔓", "Restore original PII/PHI",
+                           {"tokens": len(mask_map)}, {"restored": len(mask_map)}))
+
+        # Step 6: Finalize / validate
+        missing = _validate(result, schema)
+        steps.append(_step("finalize", "Finalize Agent", "📦", "Validate + deliver",
+                           {"fields": len(result) if isinstance(result, dict) else 0},
+                           {"delivered": True, "schema_valid": not missing, "missing_required": missing}))
+
+        latency = int((time.time() - t0) * 1000)
+        final = {"target_json": result, "provider": provider, "model": model,
+                 "valid": not missing, "missing_required": missing}
+        out = {"run_id": run_id, "capability": "agents-external", "status": "succeeded",
+               "latency_ms": latency, "steps": steps, "result": result, "final": final,
+               "masked_result": masked_result}
+        out["s3_key"] = write_log(s3, "agents-external", run_id,
+                                  {"phase": "extract", "provider": provider, "model": model,
+                                   "steps": steps, "result": result}, mask=True)
+        logger.info(f"EXTRACT SUCCESS | run_id={run_id} | provider={provider} | ms={latency}")
+        return respond(200, out)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"EXTRACT FAILED | {type(e).__name__}: {e}\n{tb}")
+        return respond(500, {"error": "extract_failed", "message": str(e), "steps": steps})
 
 
 # ── GET /v1/logs ──────────────────────────────────────────────────────────────
@@ -579,6 +857,107 @@ def _tables(blocks):
     return tables
 
 
+def _comprehend_mask(kv, do_phi=True, unique=False):
+    """Mask PII (and optionally PHI) in Textract key/values using AWS managed
+    models — Amazon Comprehend (DetectPiiEntities) and, if do_phi, Amazon
+    Comprehend Medical (DetectPHI). No training; existing models only.
+
+    Returns (masked_kv, mask_map, stats).
+      - unique=False: spans replaced with generic [TYPE] / [PHI_TYPE] labels
+        (mask_map is empty) — used by Tab 3 where no unmasking happens.
+      - unique=True : each span replaced with a UNIQUE token [PII_n], and
+        mask_map[token] = {"value": original, "type": TYPE}. This lets the
+        masked text go to an external LLM and be reversed afterwards.
+
+    Cost-minimising: values are concatenated into ONE blob → at most ONE
+    Comprehend call + ONE Comprehend Medical call per document.
+    """
+    keys = list(kv.keys())
+    blob, ranges = "", []
+    for k in keys:
+        v = str(kv.get(k) or "")
+        start = len(blob)
+        blob += v
+        ranges.append((k, start, len(blob)))
+        blob += "\n"
+
+    stats = {"engine": "AWS Comprehend (PII)", "pii_entities": 0, "phi_entities": 0, "types": []}
+    if not blob.strip():
+        return dict(kv), {}, stats
+
+    spans, types = [], set()
+
+    # ── PII via Amazon Comprehend (free-tier friendly) ──
+    r = comprehend.detect_pii_entities(Text=blob[:99000], LanguageCode="en")
+    for e in r.get("Entities", []):
+        spans.append((e["BeginOffset"], e["EndOffset"], e["Type"]))
+        types.add(e["Type"]); stats["pii_entities"] += 1
+
+    # ── PHI via Amazon Comprehend Medical (optional, pricier) ──
+    if do_phi:
+        try:
+            mr = cmedical.detect_phi(Text=blob[:19000])  # sync limit ~20k chars
+            for e in mr.get("Entities", []):
+                lbl = "PHI_" + e.get("Type", "ENTITY")
+                spans.append((e["BeginOffset"], e["EndOffset"], lbl))
+                types.add(lbl); stats["phi_entities"] += 1
+            stats["engine"] = "AWS Comprehend (PII) + Comprehend Medical (PHI)"
+        except Exception as ex:
+            logger.warning(f"Comprehend Medical PHI skipped: {ex}")
+
+    stats["types"] = sorted(types)
+
+    # Merge overlapping spans (PII + PHI can flag the same text) — greedy, keep
+    # the earliest/longest, skip anything that overlaps an accepted span.
+    spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    merged, last_end = [], -1
+    for b, e, t in spans:
+        if b >= last_end:
+            merged.append((b, e, t)); last_end = e
+
+    # Assign a stable token per span (for unique mode) + build the reverse map.
+    mask_map = {}
+    span_tokens = []  # (begin, end, replacement)
+    for i, (b, e, t) in enumerate(merged, start=1):
+        if unique:
+            token = f"[PII_{i}]"
+            mask_map[token] = {"value": blob[b:e], "type": t}
+            span_tokens.append((b, e, token))
+        else:
+            span_tokens.append((b, e, f"[{t}]"))
+
+    # Re-mask each value independently using offsets local to that value.
+    masked_kv = {}
+    for (k, vstart, vend) in ranges:
+        v = blob[vstart:vend]
+        local = [(b - vstart, e - vstart, rep) for (b, e, rep) in span_tokens if b >= vstart and e <= vend]
+        if local:
+            out = v
+            for b, e, rep in sorted(local, key=lambda x: -x[0]):
+                out = out[:b] + rep + out[e:]
+            masked_kv[k] = out
+        else:
+            masked_kv[k] = kv[k]
+    return masked_kv, mask_map, stats
+
+
+def _unmask(obj, mask_map):
+    """Recursively replace [PII_n] tokens in a JSON value with their originals."""
+    if not mask_map:
+        return obj
+    if isinstance(obj, str):
+        s = obj
+        for tok, info in mask_map.items():
+            if tok in s:
+                s = s.replace(tok, str(info.get("value", "")))
+        return s
+    if isinstance(obj, dict):
+        return {k: _unmask(v, mask_map) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_unmask(v, mask_map) for v in obj]
+    return obj
+
+
 def _norm(s):
     """Normalise a key for fuzzy comparison: lowercase, alnum tokens only."""
     return re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()
@@ -629,6 +1008,89 @@ def _flatten_to_schema(kv, schema_str, threshold=0.55):
     mapped = ({k: fill(k, v) for k, v in schema.items()}
               if isinstance(schema, dict) else fill("root", schema))
     return mapped, stats
+
+
+DEFAULT_INSURANCE_PROMPT = (
+    "You are an expert insurance underwriting data-extraction assistant. The input is "
+    "masked key/value text extracted by OCR from an insurance underwriting document "
+    "(application form, medical questionnaire, KYC/identity page, or financial statement "
+    "for an often high-net-worth applicant). Extract the requested fields into the target "
+    "JSON schema.\n"
+    "Rules:\n"
+    "- Return ONLY one JSON object that exactly matches the target schema (same keys and nesting).\n"
+    "- PRESERVE any placeholder tokens such as [PII_3] or [PII_12] EXACTLY as they appear in the "
+    "source values — do not alter, translate, summarise, split or drop them (they are substituted "
+    "with real values afterwards).\n"
+    "- Use null for missing scalar fields and [] for missing arrays. Do not invent values.\n"
+    "- Treat [X] / 'checked' as the selected option for tick-box / yes-no fields.\n"
+    "- Include 'extraction_confidence' (0-1) if that field exists in the schema."
+)
+
+
+def _build_extract_prompt(instruction, masked_kv, schema):
+    instruction = (instruction or DEFAULT_INSURANCE_PROMPT).strip()
+    return (f"{instruction}\n\nTarget JSON schema:\n{schema}\n\n"
+            f"Masked key/values from the document:\n{json.dumps(masked_kv, indent=2)}\n\n"
+            "Return only the populated JSON object, preserving any [PII_n] tokens verbatim.")
+
+
+def _http_post_json(url, headers, payload, timeout=60):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")[:600]
+        raise RuntimeError(f"HTTP {e.code} from {url.split('?')[0]}: {body}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Network error calling {url.split('?')[0]}: {e}")
+
+
+def _call_external_llm(llm, prompt):
+    """Call a caller-supplied external LLM (no AWS Bedrock) with a ready prompt.
+    Server-side, so no browser CORS issues. Supports Google Gemini, Anthropic,
+    and any OpenAI-compatible endpoint. Returns (result_json, provider)."""
+    provider = (llm.get("provider") or "").lower().strip()
+    api_key  = (llm.get("api_key") or "").strip()
+    model    = (llm.get("model") or "").strip()
+    base_url = (llm.get("base_url") or "").strip()
+    if not api_key:
+        raise ValueError("Missing LLM api_key")
+    if not model:
+        raise ValueError("Missing LLM model")
+
+    if provider == "google":
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+        payload = {"contents": [{"parts": [{"text": prompt}]}],
+                   "generationConfig": {"temperature": 0, "maxOutputTokens": 4096,
+                                        "responseMimeType": "application/json"}}
+        data = _http_post_json(url, headers, payload)
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+    elif provider == "anthropic":
+        url = "https://api.anthropic.com/v1/messages"
+        headers = {"content-type": "application/json", "x-api-key": api_key,
+                   "anthropic-version": "2023-06-01"}
+        payload = {"model": model, "max_tokens": 4096, "temperature": 0,
+                   "messages": [{"role": "user", "content": prompt}]}
+        data = _http_post_json(url, headers, payload)
+        text = data["content"][0]["text"]
+
+    elif provider in ("openai", "openai-compatible", "generic"):
+        base = (base_url or "https://api.openai.com/v1").rstrip("/")
+        url = base + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + api_key}
+        payload = {"model": model, "temperature": 0,
+                   "messages": [{"role": "user", "content": prompt}]}
+        data = _http_post_json(url, headers, payload)
+        text = data["choices"][0]["message"]["content"]
+
+    else:
+        raise ValueError(f"Unknown provider '{provider}' (use google | anthropic | openai)")
+
+    return _parse_json(text), provider
 
 
 def _bedrock_map(kv, schema, client=None):

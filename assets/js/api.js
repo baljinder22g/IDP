@@ -189,9 +189,12 @@
       { id: "ocr",      title: "OCR Agent",        icon: "🔎", svc: "AWS Textract",
         input: { s3_key: "input/" + (req.filename||"doc.pdf") },
         output: { blocks: 312, kv_pairs: 27, tables: 2, confidence: 0.97 } },
-      { id: "pii",      title: "PII Masking Agent",icon: "🛡️", svc: "Comprehend / regex",
-        input: { kv_pairs: 27 },
-        output: { masked_fields: ["email","national_id","phone"], pii_found: 3 } },
+      { id: "pii",      title: "PII/PHI Masking Agent",icon: "🛡️",
+        svc: req.detect_phi !== false ? "AWS Comprehend (PII) + Comprehend Medical (PHI)" : "AWS Comprehend (PII)",
+        input: { kv_pairs: 27, detect_phi: req.detect_phi !== false },
+        output: { pii_entities: 5, phi_entities: req.detect_phi !== false ? 3 : 0,
+                  entity_types: req.detect_phi !== false ? ["EMAIL","NAME","PHONE","PHI_AGE","PHI_MEDICATION"] : ["EMAIL","NAME","PHONE"],
+                  masked_fields: ["email","national_id","phone","date_of_birth"] } },
       { id: "extract",  title: "Extraction Agent", icon: "🧠", svc: "AWS Bedrock (Claude)",
         input: { target_keys: Object.keys(schema).length, masked: true },
         output: fillSchema(schema) },
@@ -212,6 +215,42 @@
       steps,
       result: steps.find((s) => s.id === "extract").output,
       _mock: true
+    };
+  }
+
+  // Mock external-LLM agent pipeline (6 steps) for demo mode.
+  async function mockAgentsExternal(req, onStep) {
+    const schema = parseSchema(req.target_schema);
+    const prov = (req.llm && req.llm.provider) || "google";
+    const model = (req.llm && req.llm.model) || "gemini-2.5-flash";
+    const phi = req.detect_phi !== false;
+    const steps = [
+      { id: "ingest",   title: "Ingest Agent",     icon: "📥", svc: "S3 / pre-flight",
+        input: { file: req.filename, size_kb: req.size_kb || 0 },
+        output: { pages: 4, stored: "s3://idp-input/" + (req.filename || "doc.pdf") } },
+      { id: "ocr",      title: "OCR Agent",        icon: "🔎", svc: "AWS Textract",
+        input: { s3_key: "input/" + (req.filename || "doc.pdf") },
+        output: { blocks: 312, kv_pairs: 27, tables: 2 } },
+      { id: "pii",      title: "PII/PHI Masking Agent", icon: "🛡️",
+        svc: phi ? "AWS Comprehend (PII) + Comprehend Medical (PHI)" : "AWS Comprehend (PII)",
+        input: { kv_pairs: 27, detect_phi: phi },
+        output: { pii_entities: 5, phi_entities: phi ? 3 : 0, entity_types: phi ? ["EMAIL","NAME","PHI_AGE"] : ["EMAIL","NAME"] } },
+      { id: "extract",  title: "Extraction Agent · " + prov, icon: "🧠", svc: "External LLM: " + prov + "/" + model,
+        input: { provider: prov, model }, output: fillSchema(schema) },
+      { id: "validate", title: "Validation Agent", icon: "✅", svc: "Schema check",
+        input: { against: "target_schema" }, output: { valid: true, missing_required: [] } },
+      { id: "finalize", title: "Finalize Agent", icon: "📦", svc: "Consolidate + deliver",
+        input: { fields: Object.keys(schema).length }, output: { delivered: true, schema_valid: true } },
+    ];
+    for (const s of steps) {
+      onStep && onStep(s.id, "running", null);
+      await wait(800);
+      onStep && onStep(s.id, "done", s);
+    }
+    return {
+      run_id: "run_" + Date.now().toString(36), capability: "agents-external",
+      status: "succeeded", latency_ms: steps.length * 800, steps,
+      result: steps.find((s) => s.id === "extract").output, _mock: true
     };
   }
 
@@ -272,6 +311,60 @@
       this.recordLog({ run_id: r.run_id, capability: "agents", model: "multi-agent", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/agents/" + r.run_id + ".json"), detail: r });
       return r;
     },
+    async runAgentsExternal(req, onStep) {
+      if (isMock()) {
+        const r = await mockAgentsExternal(req, onStep);
+        this.recordLog({ run_id: r.run_id, capability: "agents-external", model: (req.llm && req.llm.provider) || "external", status: r.status, latency_ms: r.latency_ms, s3_key: "logs/agents-external/" + r.run_id + ".json", detail: r });
+        return r;
+      }
+      const r = await http(IDP_CONFIG.endpoints.agentsExternal, req);
+      (r.steps || []).forEach((s) => onStep && onStep(s.id, s.status === "error" ? "error" : "done", s));
+      this.recordLog({ run_id: r.run_id, capability: "agents-external", model: (req.llm && req.llm.model) || "external", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/agents-external/" + r.run_id + ".json"), detail: r });
+      return r;
+    },
+
+    // Tab 4 — Part 1: steps 1-3 (ingest, OCR, mask). Returns OCR + masked JSON.
+    async agentsPrepare(req, onStep) {
+      if (isMock()) {
+        const phi = req.detect_phi !== false;
+        const ocr = { "First name": "Isha", "Last name": "Kapoor", "Email": "isha@example.com",
+                      "Date of birth": "12-03-1974", "Policy type": "Whole-of-Life (HNW)", "Smoker": "No" };
+        const masked = { "First name": "[PII_1]", "Last name": "[PII_2]", "Email": "[PII_3]",
+                         "Date of birth": phi ? "[PII_4]" : "12-03-1974", "Policy type": "Whole-of-Life (HNW)", "Smoker": "No" };
+        const steps = [
+          { id: "ingest", title: "Ingest Agent", icon: "📥", svc: "S3", input: { file: req.filename }, output: { stored: "s3://idp-input/" + (req.filename||"doc.pdf") } },
+          { id: "ocr", title: "OCR Agent", icon: "🔎", svc: "AWS Textract", input: { s3_key: "input/doc.pdf" }, output: { kv_pairs: Object.keys(ocr).length, blocks: 312 } },
+          { id: "pii", title: "PII/PHI Masking Agent", icon: "🛡️", svc: phi ? "AWS Comprehend (PII) + Comprehend Medical (PHI)" : "AWS Comprehend (PII)", input: { detect_phi: phi }, output: { pii_entities: 3, phi_entities: phi ? 1 : 0, entity_types: ["NAME","EMAIL"] } },
+        ];
+        for (const s of steps) { onStep && onStep(s.id, "running", null); await wait(700); onStep && onStep(s.id, "done", s); }
+        return { run_id: "run_" + Date.now().toString(36), status: "succeeded", steps, ocr_keyvalues: ocr, masked_keyvalues: masked, entities: { pii: 3, phi: phi ? 1 : 0, tokens: phi ? 4 : 3 }, _mock: true };
+      }
+      const r = await http(IDP_CONFIG.endpoints.agentsPrepare, req);
+      (r.steps || []).forEach((s) => onStep && onStep(s.id, s.status === "error" ? "error" : "done", s));
+      return r;
+    },
+
+    // Tab 4 — Part 2: steps 4-6 (LLM extract on masked data, unmask, finalize).
+    async agentsExtract(req, onStep) {
+      if (isMock()) {
+        const schema = parseSchema(req.target_schema);
+        const masked_result = fillSchema(schema);
+        const steps = [
+          { id: "extract", title: "Extraction Agent · " + ((req.llm && req.llm.provider) || "llm"), icon: "🧠", svc: "External LLM", input: { provider: (req.llm && req.llm.provider), model: (req.llm && req.llm.model) }, output: masked_result },
+          { id: "unmask", title: "Unmasking Agent", icon: "🔓", svc: "Restore original PII/PHI", input: { tokens: 4 }, output: { restored: 4 } },
+          { id: "finalize", title: "Finalize Agent", icon: "📦", svc: "Validate + deliver", input: { fields: Object.keys(schema).length }, output: { delivered: true, schema_valid: true } },
+        ];
+        for (const s of steps) { onStep && onStep(s.id, "running", null); await wait(800); onStep && onStep(s.id, "done", s); }
+        const r = { run_id: req.run_id || "run_x", status: "succeeded", steps, result: fillSchema(schema), final: { target_json: fillSchema(schema), valid: true }, _mock: true };
+        this.recordLog({ run_id: r.run_id, capability: "agents-external", model: (req.llm && req.llm.model) || "external", status: r.status, s3_key: "logs/agents-external/" + r.run_id + ".json", detail: r });
+        return r;
+      }
+      const r = await http(IDP_CONFIG.endpoints.agentsExtract, req);
+      (r.steps || []).forEach((s) => onStep && onStep(s.id, s.status === "error" ? "error" : "done", s));
+      this.recordLog({ run_id: r.run_id, capability: "agents-external", model: (req.llm && req.llm.model) || "external", status: r.status, latency_ms: r.latency_ms, s3_key: r.s3_key || ("logs/agents-external/" + r.run_id + ".json"), detail: r });
+      return r;
+    },
+
     async extractBedrockDirect(req, creds) {
       const hasCreds = creds && creds.accessKeyId && creds.secretAccessKey;
       if (!hasCreds) {
