@@ -468,7 +468,7 @@
 <section id="services">
   <div class="section-label">AWS Services</div>
   <h2 class="section-title">What each service does here</h2>
-  <p class="section-sub">Five managed AWS services work together. You don't manage any servers.</p>
+  <p class="section-sub">Managed AWS services work together (plus your own external LLM for Tab ④). You don't manage any servers.</p>
 
   <div class="card-grid card-grid-5">
     <div class="svc-card">
@@ -480,26 +480,44 @@
     <div class="svc-card">
       <span class="svc-icon">⚡</span>
       <div class="svc-name">Lambda</div>
-      <div class="svc-desc">One Python function. Reads the PDF, calls Bedrock or Textract, writes a log. No servers, pay per invocation.</div>
+      <div class="svc-desc">One Python function for every route. Reads the PDF, calls Textract / Comprehend / Bedrock (or your external LLM), writes a log. Pay per invocation.</div>
       <span class="svc-badge">Python 3.12</span>
     </div>
     <div class="svc-card">
       <span class="svc-icon">🧠</span>
       <div class="svc-name">Amazon Bedrock</div>
-      <div class="svc-desc">Foundation model API. Send a PDF + a JSON schema, Claude reads and returns the structured data. One API call.</div>
-      <span class="svc-badge">Claude (Anthropic)</span>
+      <div class="svc-desc">Foundation model API. Send a PDF + a JSON schema; Claude / Nova reads and returns the structured data in one call.</div>
+      <span class="svc-badge">Claude · Nova</span>
     </div>
     <div class="svc-card">
       <span class="svc-icon">🔎</span>
       <div class="svc-name">Amazon Textract</div>
-      <div class="svc-desc">Specialist OCR. Detects key/value pairs, checkboxes, and tables in structured forms — things Claude might miss.</div>
+      <div class="svc-desc">Specialist OCR. Detects key/value pairs, checkboxes, and tables in structured forms — returns them as JSON.</div>
       <span class="svc-badge">FORMS + TABLES</span>
+    </div>
+    <div class="svc-card">
+      <span class="svc-icon">🛡️</span>
+      <div class="svc-name">Amazon Comprehend</div>
+      <div class="svc-desc">Detects <b>PII</b> (names, emails, phones, addresses, IDs) in the extracted text via DetectPiiEntities. Used to mask before extraction. No training.</div>
+      <span class="svc-badge">PII · free tier</span>
+    </div>
+    <div class="svc-card">
+      <span class="svc-icon">🏥</span>
+      <div class="svc-name">Comprehend Medical</div>
+      <div class="svc-desc">Detects <b>PHI</b> (protected health info) via DetectPHI for medical questionnaires. Optional per-run toggle (pricier). No training.</div>
+      <span class="svc-badge">PHI · optional</span>
     </div>
     <div class="svc-card">
       <span class="svc-icon">🗄️</span>
       <div class="svc-name">Amazon S3</div>
-      <div class="svc-desc">Object storage. PDFs stored briefly (1-day auto-delete). Processing logs stored for 30 days, private.</div>
+      <div class="svc-desc">Object storage. PDFs + the reversible mask context stored briefly (1-day auto-delete). Processing logs stored 30 days, private.</div>
       <span class="svc-badge">2 private buckets</span>
+    </div>
+    <div class="svc-card">
+      <span class="svc-icon">🔌</span>
+      <div class="svc-name">Your external LLM</div>
+      <div class="svc-desc">Tab ④ only. Google Gemini, Anthropic Claude, or any OpenAI-compatible API — called server-side with your key, on masked data only.</div>
+      <span class="svc-badge">bring your own key</span>
     </div>
   </div>
 </section>
@@ -546,14 +564,15 @@ flowchart LR
 ═══════════════════════════════════════════════════════════════ -->
 <section id="strategies">
   <div class="section-label">Extraction Strategies</div>
-  <h2 class="section-title">4 ways to extract data from a PDF</h2>
-  <p class="section-sub">All 4 tabs return the same JSON shape — they just take different paths. Pick based on your document type.</p>
+  <h2 class="section-title">5 ways to extract data from a PDF</h2>
+  <p class="section-sub">Each tab returns JSON shaped to your schema — they just take different paths. Pick based on your document type and which AI you can use.</p>
 
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="s1">① Bedrock</button>
     <button class="tab-btn" data-tab="s2">② Textract</button>
-    <button class="tab-btn" data-tab="s3">③ Agentic</button>
-    <button class="tab-btn" data-tab="s4">④ Azure</button>
+    <button class="tab-btn" data-tab="s3">③ Agentic (Bedrock)</button>
+    <button class="tab-btn" data-tab="s4b">④ Agentic (Your LLM)</button>
+    <button class="tab-btn" data-tab="s4">⑤ Azure</button>
   </div>
 
   <!-- Tab 1: Bedrock -->
@@ -591,22 +610,22 @@ flowchart LR
     <div class="strategy-grid">
       <div>
         <div class="row" style="margin-bottom:12px">
-          <h3 style="margin:0">Textract OCR → Bedrock Mapping</h3>
-          <span class="strategy-badge badge-ocr">Great for forms</span>
+          <h3 style="margin:0">Textract OCR → JSON (no LLM)</h3>
+          <span class="strategy-badge badge-ocr">Deterministic</span>
         </div>
-        <p style="font-size:13.5px;color:var(--muted)">First, Amazon Textract runs specialist OCR to pull out key/value pairs, checkboxes, and tables. Then Bedrock maps those raw pairs to your target schema. Two steps, best for structured forms.</p>
-        <div class="strategy-step"><div class="step-num">1</div><div><strong>Lambda uploads PDF to S3</strong> — Textract requires S3, not direct bytes</div></div>
+        <p style="font-size:13.5px;color:var(--muted)">Amazon Textract runs specialist OCR and returns the extracted <strong>key/values and tables as JSON</strong> — no Bedrock / LLM. Optionally a deterministic (no-model) fuzzy mapper aligns the keys to your target schema.</p>
+        <div class="strategy-step"><div class="step-num">1</div><div><strong>Lambda uploads PDF to S3</strong> — Textract reads from S3, not direct bytes</div></div>
         <div class="strategy-step"><div class="step-num">2</div><div><strong>Textract async analysis</strong> — polls until job succeeds (~5–15 s)</div></div>
-        <div class="strategy-step"><div class="step-num">3</div><div><strong>Raw key/values extracted</strong> — shown as "Raw Textract output" in the UI</div></div>
-        <div class="strategy-step"><div class="step-num">4</div><div><strong>Bedrock maps to schema</strong> — Claude reshapes the OCR pairs</div></div>
+        <div class="strategy-step"><div class="step-num">3</div><div><strong>Returns key/values + tables as JSON</strong> — copyable in the UI</div></div>
+        <div class="strategy-step"><div class="step-num">4</div><div><strong>(Optional) best-effort schema map</strong> — fuzzy key matching (difflib), still no model</div></div>
       </div>
       <div class="card" style="background:var(--code-bg)">
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Best for</div>
         <ul style="padding-left:18px;font-size:13px;color:var(--text);line-height:1.8">
           <li>Structured forms (tick-boxes, fields)</li>
           <li>Tables with rows/columns</li>
-          <li>Documents where layout matters</li>
-          <li>When you need raw OCR output too</li>
+          <li>No LLM cost / no Bedrock access</li>
+          <li>When you just need raw OCR JSON</li>
         </ul>
         <div style="margin-top:14px;font-size:11px;color:var(--muted)">Route</div>
         <code style="display:block;margin-top:4px;font-size:12px">POST /v1/extract/textract</code>
@@ -621,13 +640,13 @@ flowchart LR
     <div class="strategy-grid">
       <div>
         <div class="row" style="margin-bottom:12px">
-          <h3 style="margin:0">Agentic Pipeline</h3>
+          <h3 style="margin:0">Agentic Pipeline (AWS Bedrock)</h3>
           <span class="strategy-badge badge-demo">Great for demos</span>
         </div>
-        <p style="font-size:13.5px;color:var(--muted)">A five-step pipeline where each agent has a visible input and output in the UI. Great for understanding the end-to-end flow or showcasing the capabilities.</p>
+        <p style="font-size:13.5px;color:var(--muted)">A five-step pipeline where each agent shows its own input and output in the UI. PII/PHI masking now uses <strong>Amazon Comprehend</strong> (not regex). If Bedrock access isn't enabled, steps 1–3 still complete and step 4 reports the error.</p>
         <div class="strategy-step"><div class="step-num">1</div><div>📥 <strong>Ingest Agent</strong> — stores PDF in S3</div></div>
         <div class="strategy-step"><div class="step-num">2</div><div>🔎 <strong>OCR Agent</strong> — Textract extracts key/values</div></div>
-        <div class="strategy-step"><div class="step-num">3</div><div>🛡️ <strong>PII Masking Agent</strong> — regex masks emails, phones, IDs</div></div>
+        <div class="strategy-step"><div class="step-num">3</div><div>🛡️ <strong>PII/PHI Masking Agent</strong> — Amazon Comprehend (PII) + Comprehend Medical (PHI)</div></div>
         <div class="strategy-step"><div class="step-num">4</div><div>🧠 <strong>Extraction Agent</strong> — Bedrock maps masked data to schema</div></div>
         <div class="strategy-step"><div class="step-num">5</div><div>✅ <strong>Validation Agent</strong> — checks required schema keys are present</div></div>
       </div>
@@ -637,7 +656,7 @@ flowchart LR
           <li>Demo / stakeholder presentations</li>
           <li>Understanding the flow visually</li>
           <li>Debugging which step fails</li>
-          <li>Showing PII masking in action</li>
+          <li>Showing PII/PHI masking in action</li>
         </ul>
         <div style="margin-top:14px;font-size:11px;color:var(--muted)">Route</div>
         <code style="display:block;margin-top:4px;font-size:12px">POST /v1/agents/run</code>
@@ -647,7 +666,39 @@ flowchart LR
     </div>
   </div>
 
-  <!-- Tab 4: Azure -->
+  <!-- Tab 4b: Agentic with Your Own LLM -->
+  <div class="tab-panel" id="s4b">
+    <div class="strategy-grid">
+      <div>
+        <div class="row" style="margin-bottom:12px">
+          <h3 style="margin:0">Agentic with Your Own LLM</h3>
+          <span class="strategy-badge badge-best">No Bedrock needed</span>
+        </div>
+        <p style="font-size:13.5px;color:var(--muted)">Same pipeline as ③, but step 4 calls <strong>your</strong> external model — Google Gemini, Anthropic Claude, or any OpenAI-compatible API. Runs in <strong>two stages</strong> so you can inspect OCR + masking before spending on an LLM call, and the result is <strong>un-masked</strong> at the end so the final JSON has real values. The LLM only ever sees masked data; the call is made server-side (no browser CORS).</p>
+        <div class="strategy-step"><div class="step-num">1</div><div>📥 <strong>Ingest</strong> → 🔎 <strong>OCR (Textract)</strong> → 🛡️ <strong>Mask (Comprehend, reversible [PII_n] tokens)</strong> — <code>POST /v1/agents/prepare</code></div></div>
+        <div class="strategy-step"><div class="step-num">2</div><div>👀 <strong>Review</strong> — the UI shows the OCR JSON (copyable) and the masked JSON</div></div>
+        <div class="strategy-step"><div class="step-num">3</div><div>🧠 <strong>Extract</strong> — your LLM (with an editable prompt) runs on <em>masked</em> data — <code>POST /v1/agents/extract</code></div></div>
+        <div class="strategy-step"><div class="step-num">4</div><div>🔓 <strong>Unmask</strong> — each <code>[PII_n]</code> token is replaced with the original value</div></div>
+        <div class="strategy-step"><div class="step-num">5</div><div>📦 <strong>Finalize</strong> — validate against schema; final output has real values</div></div>
+      </div>
+      <div class="card" style="background:var(--code-bg)">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Best for</div>
+        <ul style="padding-left:18px;font-size:13px;color:var(--text);line-height:1.8">
+          <li>Accounts without AWS Bedrock access</li>
+          <li>Using your own Gemini / Claude / OpenAI key</li>
+          <li>Keeping PII/PHI away from the external LLM</li>
+          <li>Auditable masked vs unmasked output</li>
+        </ul>
+        <div style="margin-top:14px;font-size:11px;color:var(--muted)">Routes</div>
+        <code style="display:block;margin-top:4px;font-size:12px">POST /v1/agents/prepare</code>
+        <code style="display:block;margin-top:4px;font-size:12px">POST /v1/agents/extract</code>
+        <div style="margin-top:10px;font-size:11px;color:var(--muted)">LLM cost</div>
+        <div style="font-size:13px;color:var(--muted);margin-top:4px">billed by your provider, not AWS</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tab 5: Azure -->
   <div class="tab-panel" id="s4">
     <div class="strategy-grid">
       <div>
@@ -1017,19 +1068,61 @@ api_key        = "choose-a-long-random-string"</pre>
         <tr onclick="toggleApi('api3')" data-id="api3">
           <td><span class="method-badge method-post">POST</span></td>
           <td><code>/v1/agents/run</code></td>
-          <td>Full 5-step agentic pipeline</td>
+          <td>Full agentic pipeline (Bedrock); step 3 masks via Comprehend</td>
           <td><span class="chip">x-api-key</span></td>
         </tr>
         <tr class="api-expand" id="api3-expand">
           <td colspan="4">
             <div class="api-expand-body">
-              <div style="font-size:13px;color:var(--muted)">Same request body as <code>/v1/extract/bedrock</code>. Response includes a <code>steps</code> array with per-agent input/output, plus the final <code>result</code>.</div>
+              <div style="font-size:13px;color:var(--muted)">Same request body as <code>/v1/extract/bedrock</code> plus <code>detect_phi</code> (bool). Response includes a <code>steps</code> array with per-agent input/output, plus <code>ocr_keyvalues</code>, <code>masked_keyvalues</code> and the final <code>result</code>.</div>
               <div class="code-block" style="margin-top:12px"><div class="code-header"><span class="lang">Response — steps array</span></div>
               <pre class="code-body">"steps": [
   { "id": "<span class="t-str">ingest</span>", "title": "<span class="t-str">Ingest Agent</span>", "input": {...}, "output": {...} },
   { "id": "<span class="t-str">ocr</span>",    "title": "<span class="t-str">OCR Agent</span>",    "input": {...}, "output": {...} },
-  <span class="t-cmt">// ... pii, extract, validate</span>
+  <span class="t-cmt">// ... pii (Comprehend PII/PHI), extract (Bedrock), validate</span>
 ]</pre></div>
+            </div>
+          </td>
+        </tr>
+
+        <tr onclick="toggleApi('api5')" data-id="api5">
+          <td><span class="method-badge method-post">POST</span></td>
+          <td><code>/v1/agents/prepare</code></td>
+          <td>Tab ④ stage 1 — OCR + Comprehend mask (reversible tokens)</td>
+          <td><span class="chip">x-api-key</span></td>
+        </tr>
+        <tr class="api-expand" id="api5-expand">
+          <td colspan="4">
+            <div class="api-expand-body">
+              <div style="font-size:13px;color:var(--muted)">Body: <code>{ document_base64, detect_phi }</code>. Runs ingest → Textract OCR → Comprehend PII/PHI masking with unique <code>[PII_n]</code> tokens, stores the reversible <code>{ocr, masked, mask_map}</code> context in S3 under the returned <code>run_id</code>, and returns <code>ocr_keyvalues</code> (original) + <code>masked_keyvalues</code>. No LLM is called.</div>
+            </div>
+          </td>
+        </tr>
+
+        <tr onclick="toggleApi('api6')" data-id="api6">
+          <td><span class="method-badge method-post">POST</span></td>
+          <td><code>/v1/agents/extract</code></td>
+          <td>Tab ④ stage 2 — your LLM on masked data, then un-mask</td>
+          <td><span class="chip">x-api-key</span></td>
+        </tr>
+        <tr class="api-expand" id="api6-expand">
+          <td colspan="4">
+            <div class="api-expand-body">
+              <div style="font-size:13px;color:var(--muted)">Body: <code>{ run_id, target_schema, prompt?, llm:{provider,api_key,model,base_url?} }</code>. Loads the masked data by <code>run_id</code>, calls your external LLM (Google / Anthropic / OpenAI-compatible) on masked values only, then un-masks the result. Returns both <code>masked_result</code> (what the model returned) and the final <code>result</code> (real values). The API key is used server-side only and never logged.</div>
+            </div>
+          </td>
+        </tr>
+
+        <tr onclick="toggleApi('api7')" data-id="api7">
+          <td><span class="method-badge method-post">POST</span></td>
+          <td><code>/v1/agents/run-external</code></td>
+          <td>Tab ④ one-shot — all 6 steps in a single call</td>
+          <td><span class="chip">x-api-key</span></td>
+        </tr>
+        <tr class="api-expand" id="api7-expand">
+          <td colspan="4">
+            <div class="api-expand-body">
+              <div style="font-size:13px;color:var(--muted)">Combines prepare + extract: <code>{ document_base64, target_schema, detect_phi, prompt?, llm }</code> → ingest → OCR → mask → your LLM → unmask → finalize, returned in one response.</div>
             </div>
           </td>
         </tr>
@@ -1136,17 +1229,24 @@ api_key        = "choose-a-long-random-string"</pre>
       <div class="code-block">
         <div class="code-header"><span class="lang">handler.py — entry point</span><button class="copy-btn" onclick="copyCode(this)">Copy</button></div>
         <pre class="code-body"><span class="t-kw">def</span> <span class="t-fn">handler</span>(event, context):
-    ctx    = event.get(<span class="t-str">"requestContext"</span>, {}).get(<span class="t-str">"http"</span>, {})
+    rc     = event.get(<span class="t-str">"requestContext"</span>, {})
+    ctx    = rc.get(<span class="t-str">"http"</span>, {})
     method = ctx.get(<span class="t-str">"method"</span>, <span class="t-str">""</span>)
     path   = ctx.get(<span class="t-str">"path"</span>, <span class="t-str">""</span>)
+    <span class="t-cmt"># named stage (e.g. "prod") prefixes the path → strip it</span>
+    stage  = rc.get(<span class="t-str">"stage"</span>)
+    <span class="t-kw">if</span> stage <span class="t-kw">and</span> stage != <span class="t-str">"$default"</span> <span class="t-kw">and</span> path.startswith(<span class="t-str">f"/{stage}/"</span>): path = path[len(stage)+<span class="t-num">1</span>:]
 
     <span class="t-kw">if</span> method == <span class="t-str">"OPTIONS"</span>:
         <span class="t-kw">return</span> {<span class="t-str">"statusCode"</span>: <span class="t-num">200</span>, <span class="t-str">"headers"</span>: CORS, <span class="t-str">"body"</span>: <span class="t-str">""</span>}
 
-    <span class="t-kw">if</span> path == <span class="t-str">"/v1/extract/bedrock"</span>  <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_bedrock</span>(event)
-    <span class="t-kw">if</span> path == <span class="t-str">"/v1/extract/textract"</span> <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_textract</span>(event)
-    <span class="t-kw">if</span> path == <span class="t-str">"/v1/agents/run"</span>       <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_agents</span>(event)
-    <span class="t-kw">if</span> path == <span class="t-str">"/v1/logs"</span>             <span class="t-kw">and</span> method == <span class="t-str">"GET"</span>:  <span class="t-kw">return</span> <span class="t-fn">handle_logs</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/extract/bedrock"</span>    <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_bedrock</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/extract/textract"</span>   <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_textract</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/agents/run"</span>         <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_agents</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/agents/prepare"</span>     <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_prepare</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/agents/extract"</span>     <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_extract</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/agents/run-external"</span> <span class="t-kw">and</span> method == <span class="t-str">"POST"</span>: <span class="t-kw">return</span> <span class="t-fn">handle_agents_external</span>(event)
+    <span class="t-kw">if</span> path == <span class="t-str">"/v1/logs"</span>               <span class="t-kw">and</span> method == <span class="t-str">"GET"</span>:  <span class="t-kw">return</span> <span class="t-fn">handle_logs</span>(event)
 
     <span class="t-kw">return</span> <span class="t-fn">respond</span>(<span class="t-num">404</span>, {<span class="t-str">"error"</span>: <span class="t-str">"not_found"</span>})</pre>
       </div>
