@@ -413,6 +413,19 @@
       }
     },
 
+    async getStats() {
+      if (isMock()) {
+        const items = [
+          { filename: "broker_A.pdf", capability: "agents-external", detect_phi: true, fields_total: 148, fields_masked: 40, fields_unmasked: 108, coverage_pct: 27.0, chars_total: 5200, chars_masked: 900, char_coverage_pct: 17.3, entities_masked: 44, pii_entities: 42, phi_entities: 43, by_source: { comprehend_pii: 30, comprehend_phi: 5, key_heuristic: 7, regex: 2 }, by_type: { NAME: 15, ADDRESS: 8, PHONE: 7, DATE_TIME: 6, EMAIL: 2, PHI_ADDRESS: 4 }, timestamp: new Date().toISOString(), ocr_masked: { "First name": "[PII_1]", "Policy type": "Whole-of-Life" } },
+          { filename: "medical_B.pdf", capability: "agents", detect_phi: true, fields_total: 92, fields_masked: 31, fields_unmasked: 61, coverage_pct: 33.7, chars_total: 3100, chars_masked: 700, char_coverage_pct: 22.6, entities_masked: 33, pii_entities: 20, phi_entities: 28, by_source: { comprehend_pii: 18, comprehend_phi: 9, key_heuristic: 4, regex: 2 }, by_type: { NAME: 9, PHI_NAME: 6, DOB: 4, PHONE: 3 }, timestamp: new Date(Date.now()-3600e3).toISOString(), ocr_masked: {} },
+        ];
+        const agg = { documents: items.length, fields_total: 240, fields_masked: 71, coverage_pct: 29.6, chars_total: 8300, chars_masked: 1600, char_coverage_pct: 19.3, pii_entities: 62, phi_entities: 71, entities_masked: 77, by_source: { comprehend_pii: 48, comprehend_phi: 14, key_heuristic: 11, regex: 4 }, by_type: { NAME: 24, ADDRESS: 8, PHONE: 10, DATE_TIME: 6, PHI_NAME: 6, DOB: 4, EMAIL: 2, PHI_ADDRESS: 4 }, by_capability: { "agents-external": 1, agents: 1 } };
+        return { aggregate: agg, items };
+      }
+      try { return await http(IDP_CONFIG.endpoints.stats, null, "GET"); }
+      catch (e) { return { aggregate: { documents: 0 }, items: [], warning: String(e.message) }; }
+    },
+
     async getLogs() {
       if (isMock()) return { items: mockLogStore() };
       try {

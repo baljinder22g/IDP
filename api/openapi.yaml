@@ -152,6 +152,21 @@ paths:
       responses:
         '200': { description: Log list, content: { application/json: { schema: { $ref: '#/components/schemas/LogList' } } } }
 
+  /v1/stats:
+    get:
+      summary: Per-document PII/PHI masking stats + aggregate (powers the dashboard)
+      description: >
+        Reads the per-document stat objects written to s3://<logs-bucket>/pii-stats/
+        by the agentic pipelines and returns them plus a precomputed aggregate.
+        Each doc records fields masked vs total, char coverage, PII/PHI entity
+        counts, and a by_source breakdown (comprehend_pii / comprehend_phi /
+        key_heuristic / regex) so you can see which layer caught each entity.
+      operationId: listStats
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 500, maximum: 1000 } }
+      responses:
+        '200': { description: Aggregate + per-doc items, content: { application/json: { schema: { $ref: '#/components/schemas/StatsResult' } } } }
+
 components:
   securitySchemes:
     ApiKeyAuth: { type: apiKey, in: header, name: x-api-key }
@@ -313,6 +328,36 @@ components:
       type: object
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/LogEntry' } }
+
+    PiiStat:
+      type: object
+      description: Per-document PII/PHI masking stats (s3://logs/pii-stats/)
+      properties:
+        run_id:            { type: string }
+        timestamp:         { type: string, format: date-time }
+        capability:        { type: string, enum: [agents, agents-external, prepare] }
+        filename:          { type: string }
+        detect_phi:        { type: boolean }
+        engine:            { type: string }
+        fields_total:      { type: integer }
+        fields_masked:     { type: integer }
+        fields_unmasked:   { type: integer }
+        coverage_pct:      { type: number }
+        chars_total:       { type: integer }
+        chars_masked:      { type: integer }
+        char_coverage_pct: { type: number }
+        entities_masked:   { type: integer }
+        pii_entities:      { type: integer }
+        phi_entities:      { type: integer }
+        by_source:         { type: object, description: "counts keyed by comprehend_pii | comprehend_phi | key_heuristic | regex" }
+        by_type:           { type: object, description: "counts keyed by entity type (NAME, EMAIL, PHI_DATE, …)" }
+        ocr_masked:        { type: object, description: "masked OCR key/values (tokens/labels — never raw PII)" }
+
+    StatsResult:
+      type: object
+      properties:
+        aggregate: { type: object, description: "summed metrics across all docs + by_source / by_type / by_capability" }
+        items:     { type: array, items: { $ref: '#/components/schemas/PiiStat' } }
 
     Error:
       type: object

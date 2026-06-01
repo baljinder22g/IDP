@@ -23,6 +23,7 @@ window.IDP_CONFIG = {
     agentsExtract:  "/v1/agents/extract",
     azure:          "/v1/extract/azure",
     logs:           "/v1/logs",
+    stats:          "/v1/stats",
   },
 
   // Default LLM prompt for Tab 4 (insurance underwriting). Editable in the UI.

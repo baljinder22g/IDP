@@ -393,6 +393,12 @@ flowchart LR
 
 <p><strong>Cost:</strong> Comprehend PII = $0.0001 / 100 chars (free tier: 5M chars/month for 12 months) → effectively free at this volume. Comprehend Medical PHI = $0.01 / 100 chars (≈$0.10–0.30 per document) — uncheck "Detect PHI" in the UI for PII-only at near-zero cost.</p>
 
+<h2>PII Dashboard (masking stats)</h2>
+
+<p>Every agentic run writes a per-document stats JSON to <code>s3://&lt;logs-bucket&gt;/pii-stats/&lt;date&gt;/&lt;run_id&gt;.json</code> (a separate folder from logs). It records: fields masked vs total, character coverage, PII/PHI entity counts, the masked OCR (tokens only — never raw PII), and a <code>by_source</code> breakdown showing which layer caught each entity (<code>comprehend_pii</code> / <code>comprehend_phi</code> / <code>key_heuristic</code> / <code>regex</code>).</p>
+
+<p>The <strong>PII Dashboard tab</strong> calls <code>GET /v1/stats</code>, which returns every per-document record plus a precomputed aggregate. It renders headline cards (documents, fields masked, coverage %, PII/PHI counts, fields left unmasked), bar charts for <em>detections by source</em> and <em>by entity type</em>, and a per-document table (click a row to inspect that document's masked OCR + stats). Run several documents through Tabs ③ and ④, then open the dashboard to see how Comprehend, the field-label heuristic, and regex each contribute, and how much PII/PHI is masked vs left.</p>
+
 <h2>Security notes</h2>
 
 <ul>

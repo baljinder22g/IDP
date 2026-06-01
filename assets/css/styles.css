@@ -204,6 +204,19 @@ pre.code, .code.output {
 .logtable tbody tr { cursor: pointer; }
 .logtable tbody tr:hover { background: var(--bg-elev-2); }
 
+/* ---------- dashboard ---------- */
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.stat-card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; box-shadow: var(--shadow); }
+.stat-card .num { font-size: 1.7rem; font-weight: 800; color: var(--accent); line-height: 1.1; }
+.stat-card .lbl { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+.stat-card .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.bars { display: flex; flex-direction: column; gap: 9px; margin-top: 8px; }
+.bar-row .bar-top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 3px; }
+.bar-row .bar-top .bv { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.bar-track { background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 6px; height: 14px; overflow: hidden; }
+.bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 6px 0 0 6px; }
+.bars .muted.center { padding: 12px 0; }
+
 /* ---------- modal ---------- */
 .modal-backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex;

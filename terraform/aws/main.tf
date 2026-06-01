@@ -270,6 +270,12 @@ resource "aws_apigatewayv2_route" "logs" {
   target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
 }
 
+resource "aws_apigatewayv2_route" "stats" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /v1/stats"
+  target    = "integrations/${aws_apigatewayv2_integration.idp.id}"
+}
+
 resource "aws_apigatewayv2_stage" "prod" {
   api_id      = aws_apigatewayv2_api.api.id
   name        = "prod"

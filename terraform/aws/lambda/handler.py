@@ -9,7 +9,7 @@ Routes by HTTP method + path:
 Every step is logged so CloudWatch gives full visibility without needing
 the Lambda console code editor (which doesn't work for zip deployments).
 """
-import base64, difflib, json, logging, os, re, time, traceback
+import base64, datetime, difflib, json, logging, os, re, time, traceback
 import urllib.request, urllib.error
 import boto3
 from common import (
@@ -147,6 +147,7 @@ def handler(event, context):
     if path == "/v1/agents/prepare"    and method == "POST": return handle_prepare(event, req_id)
     if path == "/v1/agents/extract"    and method == "POST": return handle_extract(event, req_id)
     if path == "/v1/logs"              and method == "GET":  return handle_logs(event, req_id)
+    if path == "/v1/stats"             and method == "GET":  return handle_stats(event, req_id)
 
     logger.error(f"No route matched: {method} {path}")
     return respond(404, {"error": "not_found", "path": path, "method": method})
@@ -399,6 +400,7 @@ def handle_agents(event, req_id=""):
                            {"kv_pairs": len(kv), "detect_phi": detect_phi},
                            {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
                             "entity_types": cstats["types"], "masked_fields": masked_fields}))
+        _write_pii_stats("agents", run_id, fname, cstats, masked, detect_phi)
 
         # ── Step 4: Extract (Bedrock) — isolated so steps 1-3 are preserved if it fails
         logger.info(f"── STEP 4: Extract (Bedrock model={MODEL}) ──")
@@ -514,6 +516,7 @@ def handle_agents_external(event, req_id=""):
                            {"kv_pairs": len(kv), "detect_phi": detect_phi},
                            {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
                             "entity_types": cstats["types"], "masked_fields": masked_fields}))
+        _write_pii_stats("agents-external", run_id, fname, cstats, masked, detect_phi)
 
         # ── Step 4: Extract via the caller's EXTERNAL LLM (masked input)
         logger.info(f"── STEP 4: Extract (external LLM provider={provider}) ──")
@@ -621,6 +624,7 @@ def handle_prepare(event, req_id=""):
                            {"kv_pairs": len(kv), "detect_phi": detect_phi},
                            {"pii_entities": cstats["pii_entities"], "phi_entities": cstats["phi_entities"],
                             "entity_types": cstats["types"]}))
+        _write_pii_stats("prepare", run_id, fname, cstats, masked, detect_phi)
 
         # Persist the reversible context for /extract (expires with the bucket, 1 day)
         s3.put_object(Bucket=INPUT_BUCKET, Key=f"prepare/{run_id}.json",
@@ -765,10 +769,96 @@ def handle_logs(event, req_id=""):
         return respond(500, {"error": "logs_failed", "message": str(e)})
 
 
+# ── GET /v1/stats ─────────────────────────────────────────────────────────────
+# Lists per-document PII-masking stats from s3://logs/pii-stats/ for the
+# dashboard. Returns the raw per-doc items + a precomputed aggregate.
+
+def handle_stats(event, req_id=""):
+    logger.info(_sep("STATS START"))
+    try:
+        qs    = event.get("queryStringParameters") or {}
+        limit = min(int(qs.get("limit", 500)), 1000)
+        keys = []
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=LOG_BUCKET, Prefix="pii-stats/"):
+            for obj in page.get("Contents", []):
+                keys.append((obj["LastModified"], obj["Key"]))
+        keys.sort(reverse=True)
+
+        items = []
+        for _, key in keys[:limit]:
+            try:
+                items.append(json.loads(s3.get_object(Bucket=LOG_BUCKET, Key=key)["Body"].read()))
+            except Exception as ex:
+                logger.warning(f"skip stats {key}: {ex}")
+
+        agg = {"documents": len(items), "fields_total": 0, "fields_masked": 0,
+               "chars_total": 0, "chars_masked": 0, "pii_entities": 0, "phi_entities": 0,
+               "entities_masked": 0, "by_source": {}, "by_type": {}, "by_capability": {}}
+        for d in items:
+            agg["fields_total"]   += d.get("fields_total", 0)
+            agg["fields_masked"]  += d.get("fields_masked", 0)
+            agg["chars_total"]    += d.get("chars_total", 0)
+            agg["chars_masked"]   += d.get("chars_masked", 0)
+            agg["pii_entities"]   += d.get("pii_entities", 0)
+            agg["phi_entities"]   += d.get("phi_entities", 0)
+            agg["entities_masked"] += d.get("entities_masked", 0)
+            agg["by_capability"][d.get("capability", "?")] = agg["by_capability"].get(d.get("capability", "?"), 0) + 1
+            for k, v in (d.get("by_source") or {}).items():
+                agg["by_source"][k] = agg["by_source"].get(k, 0) + v
+            for k, v in (d.get("by_type") or {}).items():
+                agg["by_type"][k] = agg["by_type"].get(k, 0) + v
+        agg["coverage_pct"] = round(100.0 * agg["fields_masked"] / agg["fields_total"], 1) if agg["fields_total"] else 0.0
+        agg["char_coverage_pct"] = round(100.0 * agg["chars_masked"] / agg["chars_total"], 1) if agg["chars_total"] else 0.0
+
+        logger.info(f"STATS SUCCESS | docs={len(items)}")
+        return respond(200, {"aggregate": agg, "items": items})
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"STATS FAILED | {type(e).__name__}: {e}\n{tb}")
+        return respond(500, {"error": "stats_failed", "message": str(e)})
+
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _step(sid, title, icon, svc, inp, outp):
     return {"id": sid, "title": title, "icon": icon, "svc": svc, "input": inp, "output": outp}
+
+
+def _write_pii_stats(capability, run_id, filename, stats, masked_kv, detect_phi):
+    """Persist per-document PII-masking stats to s3://logs/pii-stats/ for the
+    dashboard. Stores the MASKED OCR only (tokens/labels) — never raw PII."""
+    if not LOG_BUCKET:
+        return None
+    doc = {
+        "run_id": run_id,
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "capability": capability,
+        "filename": filename,
+        "detect_phi": detect_phi,
+        "engine": stats.get("engine"),
+        "fields_total": stats.get("fields_total", 0),
+        "fields_masked": stats.get("fields_masked", 0),
+        "fields_unmasked": stats.get("fields_unmasked", 0),
+        "coverage_pct": stats.get("coverage_pct", 0.0),
+        "chars_total": stats.get("chars_total", 0),
+        "chars_masked": stats.get("chars_masked", 0),
+        "char_coverage_pct": stats.get("char_coverage_pct", 0.0),
+        "entities_masked": stats.get("entities_masked", 0),
+        "pii_entities": stats.get("pii_entities", 0),
+        "phi_entities": stats.get("phi_entities", 0),
+        "by_source": stats.get("by_source", {}),
+        "by_type": stats.get("by_type", {}),
+        "ocr_masked": masked_kv,
+    }
+    key = f"pii-stats/{datetime.date.today().isoformat()}/{run_id}.json"
+    try:
+        s3.put_object(Bucket=LOG_BUCKET, Key=key,
+                      Body=json.dumps(doc, default=str).encode("utf-8"),
+                      ContentType="application/json")
+        logger.info(f"pii-stats written: {key}")
+    except Exception as ex:
+        logger.warning(f"pii-stats write failed: {ex}")
+    return key
 
 
 def _textract_poll(job_id, max_polls=20):
@@ -907,17 +997,22 @@ def _comprehend_mask(kv, do_phi=True, unique=False):
         ranges.append((k, start, len(blob)))
         blob += "\n"
 
-    stats = {"engine": "Comprehend PII + key/regex", "pii_entities": 0, "phi_entities": 0, "types": []}
+    chars_total = sum((en - s) for (_k, s, en) in ranges)
+    stats = {"engine": "Comprehend PII + key/regex", "pii_entities": 0, "phi_entities": 0,
+             "types": [], "fields_total": len(kv), "chars_total": chars_total}
     if not blob.strip():
+        stats.update({"fields_masked": 0, "fields_unmasked": len(kv), "coverage_pct": 0.0,
+                      "chars_masked": 0, "char_coverage_pct": 0.0, "entities_masked": 0,
+                      "by_source": {}, "by_type": {}})
         return dict(kv), {}, stats
 
-    spans, types = [], set()
+    spans, types = [], set()  # spans: (begin, end, type, source)
 
     # 1) Amazon Comprehend PII (context-aware) — best-effort
     try:
         r = comprehend.detect_pii_entities(Text=blob[:99000], LanguageCode="en")
         for e in r.get("Entities", []):
-            spans.append((e["BeginOffset"], e["EndOffset"], e["Type"]))
+            spans.append((e["BeginOffset"], e["EndOffset"], e["Type"], "comprehend_pii"))
             types.add(e["Type"]); stats["pii_entities"] += 1
     except Exception as ex:
         logger.warning(f"Comprehend PII skipped: {ex}")
@@ -928,7 +1023,7 @@ def _comprehend_mask(kv, do_phi=True, unique=False):
             mr = cmedical.detect_phi(Text=blob[:19000])
             for e in mr.get("Entities", []):
                 lbl = "PHI_" + e.get("Type", "ENTITY")
-                spans.append((e["BeginOffset"], e["EndOffset"], lbl))
+                spans.append((e["BeginOffset"], e["EndOffset"], lbl, "comprehend_phi"))
                 types.add(lbl); stats["phi_entities"] += 1
             stats["engine"] = "Comprehend PII + Comprehend Medical PHI + key/regex"
         except Exception as ex:
@@ -939,32 +1034,39 @@ def _comprehend_mask(kv, do_phi=True, unique=False):
         if end > start:
             for rx, lbl in _KEY_PII:
                 if rx.search(k):
-                    spans.append((start, end, lbl)); types.add(lbl); break
+                    spans.append((start, end, lbl, "key_heuristic")); types.add(lbl); break
 
     # 4) Always-on regex over the blob (emails / phones / long ids)
     for rx, lbl in _VALUE_REGEX:
         for m in rx.finditer(blob):
-            spans.append((m.start(), m.end(), lbl)); types.add(lbl)
+            spans.append((m.start(), m.end(), lbl, "regex")); types.add(lbl)
 
     # keep only spans fully inside a value range (never mask the key label itself)
-    spans = [(b, e, t) for (b, e, t) in spans
+    spans = [(b, e, t, src) for (b, e, t, src) in spans
              if any(s <= b and e <= en for (_k, s, en) in ranges)]
     stats["types"] = sorted(types)
 
-    # Merge overlapping spans — greedy, keep earliest/longest.
+    # Merge overlapping spans — greedy, keep earliest/longest (its source wins).
     spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
     merged, last_end = [], -1
-    for b, e, t in spans:
+    for b, e, t, src in spans:
         if b >= last_end:
-            merged.append((b, e, t)); last_end = e
+            merged.append((b, e, t, src)); last_end = e
+
+    # Aggregate stats from the FINAL (merged) spans = what actually got masked.
+    by_source, by_type, chars_masked = {}, {}, 0
+    for b, e, t, src in merged:
+        by_source[src] = by_source.get(src, 0) + 1
+        by_type[t] = by_type.get(t, 0) + 1
+        chars_masked += (e - b)
 
     # Assign a stable token per span (unique mode) + build the reverse map.
     mask_map = {}
     span_tokens = []  # (begin, end, replacement)
-    for i, (b, e, t) in enumerate(merged, start=1):
+    for i, (b, e, t, src) in enumerate(merged, start=1):
         if unique:
             token = f"[PII_{i}]"
-            mask_map[token] = {"value": blob[b:e], "type": t}
+            mask_map[token] = {"value": blob[b:e], "type": t, "source": src}
             span_tokens.append((b, e, token))
         else:
             span_tokens.append((b, e, f"[{t}]"))
@@ -981,7 +1083,19 @@ def _comprehend_mask(kv, do_phi=True, unique=False):
             masked_kv[k] = out
         else:
             masked_kv[k] = kv[k]
-    stats["masked_fields_count"] = sum(1 for k in kv if masked_kv.get(k) != kv.get(k))
+
+    fields_masked = sum(1 for k in kv if masked_kv.get(k) != kv.get(k))
+    stats.update({
+        "fields_masked": fields_masked,
+        "fields_unmasked": len(kv) - fields_masked,
+        "coverage_pct": round(100.0 * fields_masked / len(kv), 1) if kv else 0.0,
+        "chars_masked": chars_masked,
+        "char_coverage_pct": round(100.0 * chars_masked / chars_total, 1) if chars_total else 0.0,
+        "entities_masked": len(merged),
+        "by_source": by_source,
+        "by_type": by_type,
+        "masked_fields_count": fields_masked,  # back-compat
+    })
     return masked_kv, mask_map, stats
 
 

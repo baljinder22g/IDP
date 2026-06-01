@@ -33,6 +33,7 @@
       $("#panel-" + tab.dataset.tab).classList.add("active");
       if (tab.dataset.tab === "logs") refreshLogs();
       if (tab.dataset.tab === "docs") loadDocs();
+      if (tab.dataset.tab === "dashboard") refreshDashboard();
     });
   });
 
@@ -440,6 +441,72 @@
   $("#logs-refresh").addEventListener("click", refreshLogs);
   $("#logs-search").addEventListener("input", renderLogs);
   $("#logs-filter").addEventListener("change", renderLogs);
+
+  // ---------------- TAB: PII Dashboard ----------------
+  const SOURCE_LABELS = {
+    comprehend_pii: "Amazon Comprehend (PII)",
+    comprehend_phi: "Comprehend Medical (PHI)",
+    key_heuristic: "Field-label heuristic",
+    regex: "Regex (email/phone/id)",
+  };
+  let dashItems = [];
+  function bars(containerId, obj, labelMap) {
+    const el = $("#" + containerId);
+    const entries = Object.entries(obj || {}).sort((a, b) => b[1] - a[1]);
+    if (!entries.length) { el.innerHTML = `<div class="muted center small">No data yet.</div>`; return; }
+    const max = Math.max(...entries.map((e) => e[1]), 1);
+    el.innerHTML = entries.map(([k, v]) => `
+      <div class="bar-row">
+        <div class="bar-top"><span>${(labelMap && labelMap[k]) || k}</span><span class="bv">${v}</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:${Math.round(100 * v / max)}%"></div></div>
+      </div>`).join("");
+  }
+  function statCard(num, lbl, sub) {
+    return `<div class="stat-card"><div class="num">${num}</div><div class="lbl">${lbl}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+  }
+  async function refreshDashboard() {
+    $("#dash-meta").textContent = "Loading…";
+    const { aggregate: a, items, warning } = await API.getStats();
+    dashItems = items || [];
+    const agg = a || { documents: 0 };
+    $("#dash-cards").innerHTML = [
+      statCard(agg.documents || 0, "Documents processed"),
+      statCard((agg.fields_masked || 0) + " / " + (agg.fields_total || 0), "Fields masked / total", (agg.coverage_pct || 0) + "% field coverage"),
+      statCard((agg.coverage_pct || 0) + "%", "Field masking coverage"),
+      statCard((agg.char_coverage_pct || 0) + "%", "Character coverage", (agg.chars_masked || 0) + " / " + (agg.chars_total || 0) + " chars"),
+      statCard(agg.pii_entities || 0, "PII entities (Comprehend)"),
+      statCard(agg.phi_entities || 0, "PHI entities (Comprehend Medical)"),
+      statCard(agg.entities_masked || 0, "Total masked spans"),
+      statCard((agg.fields_unmasked != null ? agg.fields_unmasked : (agg.fields_total || 0) - (agg.fields_masked || 0)), "Fields left unmasked"),
+    ].join("");
+    bars("dash-source-bars", agg.by_source, SOURCE_LABELS);
+    bars("dash-type-bars", agg.by_type, null);
+    renderDashTable();
+    $("#dash-meta").textContent = (warning ? "⚠ " + warning + " · " : "") +
+      `${dashItems.length} document(s) · folder: s3://<logs-bucket>/pii-stats/`;
+  }
+  function renderDashTable() {
+    const body = $("#dash-body");
+    if (!dashItems.length) { body.innerHTML = `<tr><td colspan="9" class="muted center">No stats yet — run docs in Tab ③ / ④.</td></tr>`; return; }
+    body.innerHTML = dashItems.map((d, i) => {
+      const s = d.by_source || {};
+      return `<tr data-d="${i}">
+        <td>${d.timestamp ? new Date(d.timestamp).toLocaleString() : "—"}</td>
+        <td>${d.filename || "—"}</td>
+        <td>${d.capability || "—"}</td>
+        <td>${d.fields_total || 0}</td>
+        <td>${d.fields_masked || 0}</td>
+        <td><span class="status-chip done">${d.coverage_pct || 0}%</span></td>
+        <td>${d.pii_entities || 0}</td>
+        <td>${d.phi_entities || 0}</td>
+        <td>${(s.comprehend_pii || 0) + (s.comprehend_phi || 0)}/${s.key_heuristic || 0}/${s.regex || 0}</td>
+      </tr>`;
+    }).join("");
+    $$("#dash-body tr[data-d]").forEach((tr) => tr.addEventListener("click", () => {
+      show("dash-detail", dashItems[+tr.dataset.d]);
+    }));
+  }
+  $("#dash-refresh").addEventListener("click", refreshDashboard);
 
   // ---------------- TAB 7: Direct SDK ----------------
   const DIRECT_CREDS_KEY = "idp.direct-creds";
