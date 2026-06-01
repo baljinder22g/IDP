@@ -952,21 +952,31 @@ def _tables(blocks):
 # context (e.g. "First name: Isha"). Aggressive on purpose — values are restored
 # on unmask, so over-masking is safe and keeps PII away from the external LLM.
 _KEY_PII = [
-    (re.compile(r"(first|last|middle|maiden|given|sur|full|legal)\s*name|\bname\b|applicant|insured|beneficiary|spouse|dependent|nominee|physician|\bbroker\b|employer", re.I), "NAME"),
-    (re.compile(r"date of birth|d\.?o\.?b|birth\s*date|\bdob\b", re.I), "DOB"),
+    (re.compile(r"(first|last|middle|maiden|given|sur|full|legal)\s*name|\bname\b|applicant|insured|beneficiary|spouse|dependent|nominee|physician|doctor|\bbroker\b|employer|signature|signed\s*by", re.I), "NAME"),
+    # Any field whose label mentions a date OR birth/medical event date → PHI date.
+    (re.compile(r"\bdate(s)?\b|\bdob\b|d\.?o\.?b|birth|discharge|admission|consultation|diagnos|onset|treatment|hospitali|expiry|expir|issued|\bage\b|duration", re.I), "DATE"),
     (re.compile(r"e-?mail", re.I), "EMAIL"),
     (re.compile(r"phone|mobile|cell|\bfax\b|telephone|contact\s*(no|number)", re.I), "PHONE"),
-    (re.compile(r"address|street|residence|residential|postal|post\s*code|\bzip\b|place of birth", re.I), "ADDRESS"),
+    (re.compile(r"address|street|residence|residential|postal|post\s*code|\bzip\b|place of birth|\bcity\b|province|\bstate\b|country|nationality|citizenship", re.I), "ADDRESS"),
     (re.compile(r"\bssn\b|\bsin\b|social security|national\s*id|nric|aadhaar|\bpan\b|tax\s*id", re.I), "GOV_ID"),
-    (re.compile(r"passport|driver'?s?\s*licen|licen[cs]e\s*(no|number)", re.I), "ID"),
-    (re.compile(r"(policy|member|account|customer|certificate|group|plan|reference)\s*(no|number|id|#|ref)", re.I), "ACCOUNT_ID"),
+    (re.compile(r"passport|driver'?s?\s*licen|licen[cs]e", re.I), "ID"),
+    (re.compile(r"(policy|member|account|customer|certificate|group|plan|reference|claim|file|case)\s*(no|number|id|#|ref)", re.I), "ACCOUNT_ID"),
+    # Underwriting-sensitive fields (financial / demographic).
+    (re.compile(r"gender|\bsex\b|marital|occupation|job\s*title|profession|salary|\bincome\b|net\s*worth|source of wealth|annual", re.I), "SENSITIVE"),
+    # Medical / PHI fields (height, weight, conditions, meds, habits).
+    (re.compile(r"height|weight|\bbmi\b|smoker|tobacco|alcohol|medication|\bdrug\b|condition|disease|diagnosis|disabilit|pregnan|symptom|blood|cholesterol", re.I), "HEALTH"),
 ]
 
-# Always-on value regex (emails / phones / long numeric ids), independent of Comprehend.
+# Always-on value regex (emails / phones / dates / long numeric ids) — independent of Comprehend.
 _VALUE_REGEX = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "EMAIL"),
     (re.compile(r"\+?\d[\d\s().-]{7,}\d"), "PHONE"),
-    (re.compile(r"\b\d{6,}\b"), "ID"),
+    # dd-mm-yyyy / yyyy-mm-dd / dd/mm/yy etc.
+    (re.compile(r"\b\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}\b"), "DATE"),
+    # 12 Mar 2020 / March 12, 2020
+    (re.compile(r"\b\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?,?\s*\d{2,4}\b", re.I), "DATE"),
+    (re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d{1,2},?\s*\d{2,4}\b", re.I), "DATE"),
+    (re.compile(r"\b\d{5,}\b"), "ID"),
 ]
 
 

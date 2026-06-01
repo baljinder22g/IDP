@@ -465,10 +465,24 @@
     return `<div class="stat-card"><div class="num">${num}</div><div class="lbl">${lbl}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
   }
   async function refreshDashboard() {
-    $("#dash-meta").textContent = "Loading…";
-    const { aggregate: a, items, warning } = await API.getStats();
+    $("#dash-meta").textContent = "Loading… (first call can take a few seconds on a cold start)";
+    $("#dash-cards").innerHTML = `<div class="stat-card"><div class="num"><span class="spinner"></span></div><div class="lbl">Fetching stats…</div></div>`;
+    let res;
+    try { res = await API.getStats(); }
+    catch (e) { res = { aggregate: { documents: 0 }, items: [], warning: String(e.message || e) }; }
+    const { aggregate: a, items, warning } = res || {};
     dashItems = items || [];
     const agg = a || { documents: 0 };
+    if (!dashItems.length) {
+      $("#dash-cards").innerHTML = `<div class="card" style="grid-column:1/-1">
+        <strong>No stats yet.</strong>
+        <p class="muted small" style="margin:6px 0 0">Run a document in Tab ③ (Agentic) or Tab ④ (Your LLM) — each run writes a stats file to <code>s3://&lt;logs-bucket&gt;/pii-stats/</code>. Make sure the green <em>Live</em> pill is showing (⚙️ API base URL set), then come back and click <strong>↻ Refresh</strong>.${warning ? `<br>⚠ ${warning}` : ""}</p></div>`;
+      $("#dash-source-bars").innerHTML = `<div class="muted center small">No data yet.</div>`;
+      $("#dash-type-bars").innerHTML = `<div class="muted center small">No data yet.</div>`;
+      renderDashTable();
+      $("#dash-meta").textContent = `0 documents · folder: s3://<logs-bucket>/pii-stats/`;
+      return;
+    }
     $("#dash-cards").innerHTML = [
       statCard(agg.documents || 0, "Documents processed"),
       statCard((agg.fields_masked || 0) + " / " + (agg.fields_total || 0), "Fields masked / total", (agg.coverage_pct || 0) + "% field coverage"),
