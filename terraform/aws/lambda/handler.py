@@ -857,65 +857,108 @@ def _tables(blocks):
     return tables
 
 
+# Field-LABEL hints: if the Textract key matches, the whole VALUE is treated as
+# PII/PHI. This catches form fields that Comprehend misses without sentence
+# context (e.g. "First name: Isha"). Aggressive on purpose — values are restored
+# on unmask, so over-masking is safe and keeps PII away from the external LLM.
+_KEY_PII = [
+    (re.compile(r"(first|last|middle|maiden|given|sur|full|legal)\s*name|\bname\b|applicant|insured|beneficiary|spouse|dependent|nominee|physician|\bbroker\b|employer", re.I), "NAME"),
+    (re.compile(r"date of birth|d\.?o\.?b|birth\s*date|\bdob\b", re.I), "DOB"),
+    (re.compile(r"e-?mail", re.I), "EMAIL"),
+    (re.compile(r"phone|mobile|cell|\bfax\b|telephone|contact\s*(no|number)", re.I), "PHONE"),
+    (re.compile(r"address|street|residence|residential|postal|post\s*code|\bzip\b|place of birth", re.I), "ADDRESS"),
+    (re.compile(r"\bssn\b|\bsin\b|social security|national\s*id|nric|aadhaar|\bpan\b|tax\s*id", re.I), "GOV_ID"),
+    (re.compile(r"passport|driver'?s?\s*licen|licen[cs]e\s*(no|number)", re.I), "ID"),
+    (re.compile(r"(policy|member|account|customer|certificate|group|plan|reference)\s*(no|number|id|#|ref)", re.I), "ACCOUNT_ID"),
+]
+
+# Always-on value regex (emails / phones / long numeric ids), independent of Comprehend.
+_VALUE_REGEX = [
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "EMAIL"),
+    (re.compile(r"\+?\d[\d\s().-]{7,}\d"), "PHONE"),
+    (re.compile(r"\b\d{6,}\b"), "ID"),
+]
+
+
 def _comprehend_mask(kv, do_phi=True, unique=False):
-    """Mask PII (and optionally PHI) in Textract key/values using AWS managed
-    models — Amazon Comprehend (DetectPiiEntities) and, if do_phi, Amazon
-    Comprehend Medical (DetectPHI). No training; existing models only.
+    """Mask PII/PHI in Textract key/values. Four layers (so misses are rare):
+      1. Amazon Comprehend DetectPiiEntities — fed the field LABEL as context.
+      2. Amazon Comprehend Medical DetectPHI (if do_phi) — optional.
+      3. Field-label heuristic (_KEY_PII) — masks the whole value when the key
+         name indicates PII (catches names/DOB/etc. Comprehend misses).
+      4. Always-on regex (_VALUE_REGEX) — emails / phones / long ids.
+    Layers 1-2 are best-effort (skipped on error); 3-4 always run, so masking
+    works even if Comprehend is unavailable.
 
     Returns (masked_kv, mask_map, stats).
-      - unique=False: spans replaced with generic [TYPE] / [PHI_TYPE] labels
-        (mask_map is empty) — used by Tab 3 where no unmasking happens.
-      - unique=True : each span replaced with a UNIQUE token [PII_n], and
-        mask_map[token] = {"value": original, "type": TYPE}. This lets the
-        masked text go to an external LLM and be reversed afterwards.
-
-    Cost-minimising: values are concatenated into ONE blob → at most ONE
-    Comprehend call + ONE Comprehend Medical call per document.
+      - unique=False: generic [TYPE] labels (mask_map empty) — Tab 3.
+      - unique=True : unique [PII_n] tokens + reversible mask_map — Tab 4.
+    Cost-minimising: one Comprehend call + one Comprehend Medical call per doc.
     """
     keys = list(kv.keys())
+    # "key: value\n" blob → Comprehend sees the label context, but we only ever
+    # mask inside the VALUE sub-range (recorded in `ranges`).
     blob, ranges = "", []
     for k in keys:
         v = str(kv.get(k) or "")
+        blob += f"{k}: "
         start = len(blob)
         blob += v
         ranges.append((k, start, len(blob)))
         blob += "\n"
 
-    stats = {"engine": "AWS Comprehend (PII)", "pii_entities": 0, "phi_entities": 0, "types": []}
+    stats = {"engine": "Comprehend PII + key/regex", "pii_entities": 0, "phi_entities": 0, "types": []}
     if not blob.strip():
         return dict(kv), {}, stats
 
     spans, types = [], set()
 
-    # ── PII via Amazon Comprehend (free-tier friendly) ──
-    r = comprehend.detect_pii_entities(Text=blob[:99000], LanguageCode="en")
-    for e in r.get("Entities", []):
-        spans.append((e["BeginOffset"], e["EndOffset"], e["Type"]))
-        types.add(e["Type"]); stats["pii_entities"] += 1
+    # 1) Amazon Comprehend PII (context-aware) — best-effort
+    try:
+        r = comprehend.detect_pii_entities(Text=blob[:99000], LanguageCode="en")
+        for e in r.get("Entities", []):
+            spans.append((e["BeginOffset"], e["EndOffset"], e["Type"]))
+            types.add(e["Type"]); stats["pii_entities"] += 1
+    except Exception as ex:
+        logger.warning(f"Comprehend PII skipped: {ex}")
 
-    # ── PHI via Amazon Comprehend Medical (optional, pricier) ──
+    # 2) Amazon Comprehend Medical PHI — optional, best-effort
     if do_phi:
         try:
-            mr = cmedical.detect_phi(Text=blob[:19000])  # sync limit ~20k chars
+            mr = cmedical.detect_phi(Text=blob[:19000])
             for e in mr.get("Entities", []):
                 lbl = "PHI_" + e.get("Type", "ENTITY")
                 spans.append((e["BeginOffset"], e["EndOffset"], lbl))
                 types.add(lbl); stats["phi_entities"] += 1
-            stats["engine"] = "AWS Comprehend (PII) + Comprehend Medical (PHI)"
+            stats["engine"] = "Comprehend PII + Comprehend Medical PHI + key/regex"
         except Exception as ex:
             logger.warning(f"Comprehend Medical PHI skipped: {ex}")
 
+    # 3) Field-label heuristic — mask the WHOLE value when the key looks like PII
+    for (k, start, end) in ranges:
+        if end > start:
+            for rx, lbl in _KEY_PII:
+                if rx.search(k):
+                    spans.append((start, end, lbl)); types.add(lbl); break
+
+    # 4) Always-on regex over the blob (emails / phones / long ids)
+    for rx, lbl in _VALUE_REGEX:
+        for m in rx.finditer(blob):
+            spans.append((m.start(), m.end(), lbl)); types.add(lbl)
+
+    # keep only spans fully inside a value range (never mask the key label itself)
+    spans = [(b, e, t) for (b, e, t) in spans
+             if any(s <= b and e <= en for (_k, s, en) in ranges)]
     stats["types"] = sorted(types)
 
-    # Merge overlapping spans (PII + PHI can flag the same text) — greedy, keep
-    # the earliest/longest, skip anything that overlaps an accepted span.
+    # Merge overlapping spans — greedy, keep earliest/longest.
     spans.sort(key=lambda x: (x[0], -(x[1] - x[0])))
     merged, last_end = [], -1
     for b, e, t in spans:
         if b >= last_end:
             merged.append((b, e, t)); last_end = e
 
-    # Assign a stable token per span (for unique mode) + build the reverse map.
+    # Assign a stable token per span (unique mode) + build the reverse map.
     mask_map = {}
     span_tokens = []  # (begin, end, replacement)
     for i, (b, e, t) in enumerate(merged, start=1):
@@ -938,6 +981,7 @@ def _comprehend_mask(kv, do_phi=True, unique=False):
             masked_kv[k] = out
         else:
             masked_kv[k] = kv[k]
+    stats["masked_fields_count"] = sum(1 for k in kv if masked_kv.get(k) != kv.get(k))
     return masked_kv, mask_map, stats
 
 

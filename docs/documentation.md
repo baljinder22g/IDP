@@ -382,7 +382,14 @@ flowchart LR
 
 <p><strong>Log masking (all tabs):</strong> before any log object is written to S3, <code>common.py:mask_pii()</code> replaces email addresses, phone numbers, and long numeric IDs with <code>[EMAIL]</code>, <code>[PHONE]</code>, <code>[ID]</code> when <code>mask_pii: true</code> (default).</p>
 
-<p><strong>Agentic pipeline step 3 (managed models):</strong> the Agentic tab masks the extracted key/values using <strong>Amazon Comprehend</strong> <code>DetectPiiEntities</code> for PII and, when <code>detect_phi: true</code>, <strong>Amazon Comprehend Medical</strong> <code>DetectPHI</code> for PHI. Detected spans are replaced with <code>[TYPE]</code> / <code>[PHI_TYPE]</code> labels. No models are trained — these are AWS's existing managed models. To minimise cost, all values are concatenated so each document needs at most <strong>one Comprehend call + one Comprehend Medical call</strong>; if Comprehend is unavailable it falls back to regex masking.</p>
+<p><strong>Agentic pipeline step 3 — 4-layer masking (managed models, no training):</strong> the Agentic tabs mask the extracted key/values using four layers so misses are rare:</p>
+<ol>
+<li><strong>Amazon Comprehend</strong> <code>DetectPiiEntities</code> for PII — the field <em>label</em> is sent as context (e.g. <code>First name: Isha</code>) so context-dependent entities like names are detected, but only the value is masked.</li>
+<li><strong>Amazon Comprehend Medical</strong> <code>DetectPHI</code> for PHI (when <code>detect_phi: true</code>).</li>
+<li><strong>Field-label heuristic</strong> — if the Textract key matches a PII label (name, DOB, email, phone, address/postal, SSN/PAN/Aadhaar, passport/licence, policy/member/account number) the <em>whole value</em> is masked, catching anything Comprehend missed.</li>
+<li><strong>Always-on regex</strong> — emails, phones, and long numeric IDs.</li>
+</ol>
+<p>Layers 1–2 are best-effort (skipped on error); layers 3–4 always run, so masking still works even if Comprehend is unavailable. All values are concatenated so each document needs at most <strong>one Comprehend call + one Comprehend Medical call</strong>. In Tab ④ each span becomes a reversible <code>[PII_n]</code> token (un-masked after the LLM); in Tab ③ spans become <code>[TYPE]</code> labels.</p>
 
 <p><strong>Cost:</strong> Comprehend PII = $0.0001 / 100 chars (free tier: 5M chars/month for 12 months) → effectively free at this volume. Comprehend Medical PHI = $0.01 / 100 chars (≈$0.10–0.30 per document) — uncheck "Detect PHI" in the UI for PII-only at near-zero cost.</p>
 
